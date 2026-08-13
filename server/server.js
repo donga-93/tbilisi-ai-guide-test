@@ -508,7 +508,17 @@ function connectToGeminiLive(clientSocket, session) {
                 "Avoid long monologues. " +
                 "You only have landmark names and types below, not full " +
                 "descriptions — call getLandmarkDetails whenever the user " +
-                "asks about a specific landmark's history or details." +
+                "asks about a specific landmark's history or details. " +
+                "If the user asks what's interesting nearby, suggest a couple of the " +
+                "closest landmarks below (they're already ordered by distance) and briefly " +
+                "say why each is worth seeing. " +
+                "After you finish describing a specific landmark in any detail, ask the user " +
+                "if they'd like to see it on the map with directions (e.g. 'Would you like " +
+                "directions there?'). If they confirm (\"yes\", \"show me\", \"sure\", etc.), " +
+                "call showRouteToPlace with that landmark's name — do not call it unless the " +
+                "user has explicitly confirmed. If the user asks to see a place on the map " +
+                "without asking for directions, call openPlaceOnMap instead, which keeps the " +
+                "conversation going." +
                 (session.landmarks && session.landmarks.length > 0
                   ? "\n\n" + buildLandmarksSkeletonText(session.landmarks)
                   : ""),
@@ -612,7 +622,7 @@ function connectToGeminiLive(clientSocket, session) {
           // Send action to React Native
           // ----------------------------------------------
 
-          if (call.name === "openPlaceOnMap") {
+          if (call.name === "openPlaceOnMap" || call.name === "showRouteToPlace") {
             sendToClient(clientSocket, {
               type: "action",
               name: call.name,

@@ -103,10 +103,7 @@ const PLACE_CATEGORIES = {
   gas_station: { includedType: "gas_station", label: "gas station" },
   pharmacy: { includedType: "pharmacy", label: "pharmacy" },
   park: { includedType: "park", label: "park" },
-  transport: {
-    includedType: "transit_station",
-    label: "public transport station",
-  },
+  transport: { includedType: "transit_station", label: "public transport station" },
   atm: { includedType: "atm", label: "ATM" },
 };
 
@@ -200,10 +197,7 @@ async function fetchNearbyPlaces(location, category, keyword, maxResults) {
       places = data.places || [];
     }
   } catch (error) {
-    console.error(
-      "findNearbyPlaces: Places API request failed:",
-      error.message,
-    );
+    console.error("findNearbyPlaces: Places API request failed:", error.message);
     return { error: "place_search_failed" };
   }
 
@@ -234,9 +228,7 @@ function findLandmarkByTitle(landmarks, rawQuery) {
   });
 
   if (exact) {
-    console.log(
-      `getLandmarkDetails: "${rawQuery}" → exact match "${exact.title}"`,
-    );
+    console.log(`getLandmarkDetails: "${rawQuery}" → exact match "${exact.title}"`);
     return exact;
   }
 
@@ -310,7 +302,7 @@ const toolDeclarations = [
       {
         name: "openPlaceOnMap",
         description:
-          "Focuses the in-app map on a named place so the user can see where it is. Call this whenever the user asks to see, open, or be taken to a place.",
+          "Focuses the in-app map on a named place so the user can see where it is, without ending the conversation. Call this whenever the user asks to see, open, or be taken to a place mid-conversation.",
         parameters: {
           type: "OBJECT",
           properties: {
@@ -318,6 +310,25 @@ const toolDeclarations = [
               type: "STRING",
               description:
                 'The Firebase placeId or a well-known place name (e.g. "narikala").',
+            },
+          },
+          required: ["placeId"],
+        },
+      },
+      {
+        name: "showRouteToPlace",
+        description:
+          "Ends the voice conversation, switches to the map, and draws a route from the user's " +
+          "current location to the named place. Only call this after you have discussed a specific " +
+          "landmark and the user has explicitly confirmed they want directions/to see it on the map " +
+          "(e.g. they said \"yes\", \"show me\", \"sure\"). Do not call this speculatively — always ask first.",
+        parameters: {
+          type: "OBJECT",
+          properties: {
+            placeId: {
+              type: "STRING",
+              description:
+                'The Firebase placeId or the landmark name as discussed, e.g. "Narikala Fortress".',
             },
           },
           required: ["placeId"],
@@ -378,6 +389,13 @@ async function executeTool(name, args, session) {
     case "openPlaceOnMap": {
       // No data to hand back to Gemini beyond an ack — the actual map action is
       // dispatched to the client separately (see handleToolCall in server.js).
+      return { ok: true, placeId: args.placeId };
+    }
+    case "showRouteToPlace": {
+      // Same shape as openPlaceOnMap — the client distinguishes them by
+      // action name (server.js forwards both as "action" messages) and
+      // reacts differently: showRouteToPlace also closes the Live modal
+      // and triggers route drawing, openPlaceOnMap just re-centers the map.
       return { ok: true, placeId: args.placeId };
     }
     case "getLandmarkDetails": {
