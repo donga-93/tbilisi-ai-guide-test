@@ -2,7 +2,7 @@
 // Gemini decides when to call these mid-conversation based on what the user says.
 
 // ============================================================
-// Fuzzy title matching
+// Fuzzy title matching (Task 2/4)
 //
 // Mirrors the proportional common-prefix approach already used
 // client-side in AiGuideAssistant.tsx (wordsMatch/commonPrefixLength):
@@ -15,23 +15,7 @@
 
 const MIN_COMMON_PREFIX_LENGTH = 3;
 const MIN_COMMON_PREFIX_RATIO = 0.6;
-const MIN_TITLE_MATCH_SCORE = 0.45;
-
-// Colloquial / shortened Georgian names → canonical title fragments.
-// Keys are lower-case; values are extra substrings to match against titles.
-const GEORGIAN_ALIASES = {
-  ნარიყალა: ["narikala", "ნარიყალ"],
-  სამება: ["sameba", "tsminda sameba", "trinity"],
-  მეტეხი: ["metekhi"],
-  მთაწმინდა: ["mtatsminda"],
-  აბანოთუბანი: ["abano", "bath district"],
-  პუშკინი: ["pushkin", "pushkini", "აბანოთუბან"],
-  rustaveli: ["რუსთaveli", "rustavelis", "rustaveli avenue", "opera"],
-  ფანვილი: ["fanvil", "dry bridge"],
-  ლურჯი: ["blue mosque", "mosque"],
-  ჩუღურეთი: ["chugureti"],
-  დედაჩემი: ["kartlis deda", "mother of georgia"],
-};
+const MIN_TITLE_MATCH_SCORE = 0.6;
 
 function commonPrefixLength(a, b) {
   const maxLen = Math.min(a.length, b.length);
@@ -52,51 +36,15 @@ function wordsMatch(a, b) {
 function tokenize(text) {
   return text
     .toLowerCase()
-    .split(/[\s,.()!?;:„""'-]+/)
+    .split(/[\s,.()!?;:„""-]+/)
     .filter(Boolean);
-}
-
-function getSearchableNames(landmark) {
-  const names = new Set();
-
-  if (landmark.title) {
-    names.add(landmark.title.toLowerCase().trim());
-  }
-
-  for (const alt of landmark.alternateTitles || []) {
-    if (alt) {
-      names.add(String(alt).toLowerCase().trim());
-    }
-  }
-
-  // First token of the title (e.g. "ნარიყალა" from "ნარიყალას ციხe")
-  const firstWord = (landmark.title || "").split(/\s+/)[0];
-  if (firstWord && firstWord.length >= 3) {
-    names.add(firstWord.toLowerCase());
-  }
-
-  for (const [alias, hints] of Object.entries(GEORGIAN_ALIASES)) {
-    const titleLower = (landmark.title || "").toLowerCase();
-    const matchesLandmark =
-      titleLower.includes(alias) ||
-      hints.some((hint) => titleLower.includes(hint.toLowerCase()));
-
-    if (matchesLandmark) {
-      names.add(alias);
-      for (const hint of hints) {
-        names.add(hint.toLowerCase());
-      }
-    }
-  }
-
-  return [...names];
 }
 
 // Fraction of query words that found a case-tolerant match somewhere
 // in the title. 1.0 = every query word matched something in the title.
-function scoreTitleMatch(query, searchableName) {
+function scoreTitleMatch(query, title) {
   const queryWords = tokenize(query);
-  const titleWords = tokenize(searchableName);
+  const titleWords = tokenize(title);
 
   if (queryWords.length === 0 || titleWords.length === 0) {
     return 0;
@@ -113,61 +61,38 @@ function scoreTitleMatch(query, searchableName) {
   return matchedCount / queryWords.length;
 }
 
-function findLandmarkByTitle(landmarks, rawQuery) {
-  const query = (rawQuery || "").toLowerCase().trim();
-
-  if (!query || !landmarks || landmarks.length === 0) {
-    return null;
-  }
-
-  // Fast path: exact substring match against any searchable name variant
-  for (const landmark of landmarks) {
-    for (const name of getSearchableNames(landmark)) {
-      if (name.includes(query) || query.includes(name)) {
-        console.log(
-          `getLandmarkDetails: "${rawQuery}" → substring match "${landmark.title}" via "${name}"`,
-        );
-        return landmark;
-      }
-    }
-  }
-
-  let best = null;
-  let bestScore = 0;
-  let bestVia = "";
-
-  for (const landmark of landmarks) {
-    for (const name of getSearchableNames(landmark)) {
-      const score = scoreTitleMatch(query, name);
-
-      if (score > bestScore) {
-        bestScore = score;
-        best = landmark;
-        bestVia = name;
-      }
-    }
-  }
-
-  const matched = best && bestScore >= MIN_TITLE_MATCH_SCORE ? best : null;
-
-  console.log(
-    `getLandmarkDetails: "${rawQuery}" → ` +
-      (matched
-        ? `fuzzy match "${matched.title}" via "${bestVia}" (score ${bestScore.toFixed(2)})`
-        : `no match above threshold (best score ${bestScore.toFixed(2)}${best ? `, closest was "${best.title}"` : ""})`),
-  );
-
-  return matched;
-}
-
+// Finds the best matching landmark for a free-form title query.
+// 1) Fast path: exact substring match either direction — handles the
+//    common case where Gemini echoes the title back verbatim.
+// 2) Fallback: fuzzy word-level score across all landmarks, tolerant
+//    of Georgian case-ending variation. Logs the decision so live
+//    testing (Task 2) can confirm Gemini's calls are resolving right.
 // ============================================================
-// findNearbyPlaces
+// findNearbyPlaces (Task 3, generalized)
+//
+// Mirrors the Places API (New) pattern already used client-side
+// in map.tsx (searchNearbyPlaces/searchPlacesByText): POST with
+// X-Goog-Api-Key header + X-Goog-FieldMask, not the legacy
+// query-string Places API.
+//
+// Uses its own server-side key (GOOGLE_PLACES_API_KEY) rather than
+// the app-bundled EXPO_PUBLIC_GOOGLE_PLACES_REST_KEY — that one is
+// restricted to the app's bundle id/referrer, which a backend
+// server doesn't have, so it needs a separate key restricted by
+// server IP instead. Add GOOGLE_PLACES_API_KEY to the server's .env.
+//
+// One generalized tool (category enum) instead of one function per
+// place type — restaurant, hotel, nightlife, shopping, store, cafe,
+// gas station, pharmacy, park, public transport, ATM all share the
+// exact same Places API mechanics; only the includedType differs.
 // ============================================================
 
 const GOOGLE_PLACES_API_KEY = process.env.GOOGLE_PLACES_API_KEY;
 const DEFAULT_SEARCH_RADIUS_METERS = 1500;
 const DEFAULT_MAX_RESULTS = 3;
 
+// category (what Gemini passes) → { Places API (New) includedType,
+// human-readable label used to build free-text searchText queries }
 const PLACE_CATEGORIES = {
   restaurant: { includedType: "restaurant", label: "restaurant" },
   hotel: { includedType: "lodging", label: "hotel" },
@@ -229,6 +154,9 @@ async function fetchNearbyPlaces(location, category, keyword, maxResults) {
 
   try {
     if (keyword) {
+      // Keyword is free text ("Georgian", "24 hour", "Carrefour", ...) —
+      // includedTypes only covers a fixed enum, so a text query with
+      // location bias is the more reliable way to filter within a category.
       const response = await fetch(
         "https://places.googleapis.com/v1/places:searchText",
         {
@@ -293,6 +221,48 @@ async function fetchNearbyPlaces(location, category, keyword, maxResults) {
   return { results };
 }
 
+function findLandmarkByTitle(landmarks, rawQuery) {
+  const query = (rawQuery || "").toLowerCase().trim();
+
+  if (!query || !landmarks || landmarks.length === 0) {
+    return null;
+  }
+
+  const exact = landmarks.find((l) => {
+    const title = l.title.toLowerCase();
+    return title.includes(query) || query.includes(title);
+  });
+
+  if (exact) {
+    console.log(
+      `getLandmarkDetails: "${rawQuery}" → exact match "${exact.title}"`,
+    );
+    return exact;
+  }
+
+  let best = null;
+  let bestScore = 0;
+
+  for (const l of landmarks) {
+    const score = scoreTitleMatch(query, l.title);
+
+    if (score > bestScore) {
+      bestScore = score;
+      best = l;
+    }
+  }
+
+  const matched = best && bestScore >= MIN_TITLE_MATCH_SCORE ? best : null;
+
+  console.log(
+    `getLandmarkDetails: "${rawQuery}" → ` +
+      (matched
+        ? `fuzzy match "${matched.title}" (score ${bestScore.toFixed(2)})`
+        : `no match above threshold (best score ${bestScore.toFixed(2)}${best ? `, closest was "${best.title}"` : ""})`),
+  );
+
+  return matched;
+}
 const toolDeclarations = [
   {
     functionDeclarations: [
@@ -375,14 +345,13 @@ const toolDeclarations = [
       {
         name: "getLandmarkDetails",
         description:
-          'Returns the full description/history for a specific landmark by name. ALWAYS call this before describing a landmark in detail. Accepts Georgian or English names and common short forms (e.g. "ნარიყალა" for Narikala Fortress).',
+          'Returns the full description/history for a specific landmark by name. Call this when the user asks for details, history, or "tell me about" a place that was only briefly mentioned in the skeleton list.',
         parameters: {
           type: "OBJECT",
           properties: {
             title: {
               type: "STRING",
-              description:
-                'The landmark name in any language or short form, e.g. "ნარიყალა", "Narikala Fortress".',
+              description: 'The landmark\'s name, e.g. "Narikala Fortress".',
             },
           },
           required: ["title"],
@@ -392,10 +361,27 @@ const toolDeclarations = [
   },
 ];
 
+/**
+ * Executes a tool call from Gemini and returns the result to send back as a functionResponse.
+ * `session` carries per-connection context (currentLocation, landmarks, etc. — wired in
+ * via the "context" message from GeminiLiveModal.tsx; see server.js).
+ *
+ * findNearbyPlaces resolves data server-side (Google Places API) and returns it to Gemini,
+ * for any of the categories in PLACE_CATEGORIES (restaurant, hotel, nightlife, shopping,
+ * store, cafe, gas_station, pharmacy, park, transport, atm).
+ * openPlaceOnMap is different: the map lives on the client, so beyond acking the call, the
+ * proxy also forwards a UI action event to the client — see server.js handleToolCall.
+ * getLandmarkDetails looks up a full description from session.landmarks, which the client
+ * sends once at session start alongside the lightweight skeleton context.
+ */
 async function executeTool(name, args, session) {
   switch (name) {
     case "findNearbyPlaces": {
       if (!session.currentLocation) {
+        // GeminiLiveModal.tsx sends currentLocation as part of its "context"
+        // messages (initial fix + periodic GPS updates). If none has arrived
+        // yet — permission not granted, or fix still pending — tell Gemini
+        // rather than silently returning fabricated results.
         return { error: "location_unavailable" };
       }
 
@@ -409,9 +395,15 @@ async function executeTool(name, args, session) {
       );
     }
     case "openPlaceOnMap": {
+      // No data to hand back to Gemini beyond an ack — the actual map action is
+      // dispatched to the client separately (see handleToolCall in server.js).
       return { ok: true, placeId: args.placeId };
     }
     case "showRouteToPlace": {
+      // Same shape as openPlaceOnMap — the client distinguishes them by
+      // action name (server.js forwards both as "action" messages) and
+      // reacts differently: showRouteToPlace also closes the Live modal
+      // and triggers route drawing, openPlaceOnMap just re-centers the map.
       return { ok: true, placeId: args.placeId };
     }
     case "getLandmarkDetails": {
