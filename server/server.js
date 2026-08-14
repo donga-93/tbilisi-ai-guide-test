@@ -464,7 +464,7 @@ function connectToGeminiLive(clientSocket, session) {
             startOfSpeechSensitivity: "START_SENSITIVITY_LOW",
             endOfSpeechSensitivity: "END_SENSITIVITY_LOW",
             prefixPaddingMs: 300,
-            silenceDurationMs: 600,
+            silenceDurationMs: 800,
           },
         },
 
@@ -519,6 +519,8 @@ function connectToGeminiLive(clientSocket, session) {
                 "user has explicitly confirmed. If the user asks to see a place on the map " +
                 "without asking for directions, call openPlaceOnMap instead, which keeps the " +
                 "conversation going." +
+                "If getLandmarkDetails returns found:false, do NOT say you could not find information. " +
+                "Instead, apologize briefly and offer to tell the user about a similar nearby landmark. " +
                 (session.landmarks && session.landmarks.length > 0
                   ? "\n\n" + buildLandmarksSkeletonText(session.landmarks)
                   : ""),

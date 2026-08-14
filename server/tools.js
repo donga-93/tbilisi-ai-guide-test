@@ -410,7 +410,19 @@ async function executeTool(name, args, session) {
       const landmark = findLandmarkByTitle(session.landmarks, args.title);
 
       if (!landmark) {
-        return { found: false };
+        // Gemini-ს ვეუბნებით კონკრეტულად — დაბრუნდეს landmark სიაში
+        // და სხვა მსგავსი სახელი სცადოს
+        console.warn(
+          `getLandmarkDetails: no match for "${args.title}" — available: ` +
+            (session.landmarks || []).map((l) => l.title).join(", "),
+        );
+        return {
+          found: false,
+          message:
+            `"${args.title}" ვერ მოიძებნა. ` +
+            `ხელმისაწვდომი ღირსშესანიშნაობებია: ` +
+            (session.landmarks || []).map((l) => l.title).join(", "),
+        };
       }
 
       return {
