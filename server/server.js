@@ -28,6 +28,85 @@ function buildLandmarksSkeletonText(landmarks) {
   );
 }
 
+function buildNearbyDetailsText(nearbyLandmarks) {
+  if (!nearbyLandmarks || nearbyLandmarks.length === 0) return "";
+
+  const lines = nearbyLandmarks
+    .map(
+      (l) =>
+        `- ${l.title} (${l.type}): ${(l.description || "").slice(0, 500)}`,
+    )
+    .join("\n");
+
+  return (
+    "ახლოს მდებარე ღირსშესანიშნაობების სრული აღწერები — " +
+    "ამ ინფორმაციას პირდაპირ გამოიყენე, tool call არ გჭირდება " +
+    "ამ ლოკაციებისთვის:\n" +
+    lines
+  );
+}
+
+function buildSystemInstruction(session) {
+  const lang = session.lang || "ka";
+  const langNames = {
+    ka: "Georgian (ქართული)",
+    en: "English",
+    ru: "Russian",
+    tr: "Turkish",
+    de: "German",
+    fr: "French",
+    es: "Spanish",
+    it: "Italian",
+    ja: "Japanese",
+    ko: "Korean",
+    zh: "Chinese",
+  };
+  const langLabel = langNames[lang] || lang;
+
+  let text =
+    "You are a concise Tbilisi tour guide in a real-time voice conversation. " +
+    "Wait for the user to speak first — do not say anything until the user speaks. " +
+    `The user's app language is ${langLabel}. Once the user speaks, respond ONLY in that language. ` +
+    "Keep all answers short and conversational — 2-4 sentences unless the user asks for more. " +
+    "Avoid long monologues. " +
+    "CRITICAL: Before describing any landmark's history or details, you MUST call " +
+    "getLandmarkDetails with the landmark name (Georgian or English both work). " +
+    "NEVER say you could not find information without calling getLandmarkDetails first. " +
+    "If nearby landmark full descriptions were provided in context, use those directly " +
+    "without a tool call for those specific places. " +
+    "You only have landmark names and types in the skeleton list below, not full " +
+    "descriptions — call getLandmarkDetails for anything not already in the nearby details block. ";
+
+  if (lang === "ka") {
+    text +=
+      "When speaking Georgian: use correct grammatical forms and proper noun spellings. " +
+      "For centuries use ordinal forms (e.g. 'მეცამეტე საუკუნe', never 'ცამეტი საუკუნe'). " +
+      "Pronounce Georgian place names clearly and naturally — do not anglicize them. ";
+  }
+
+  text +=
+    "If the user asks what's interesting nearby, suggest a couple of the " +
+    "closest landmarks below (they're already ordered by distance) and briefly " +
+    "say why each is worth seeing. " +
+    "After you finish describing a specific landmark in any detail, ask the user " +
+    "if they'd like to see it on the map with directions. " +
+    "If they confirm ('yes', 'show me', 'sure', 'დიახ', 'მინდა', etc.), " +
+    "call showRouteToPlace with that landmark's name — do not call it unless the " +
+    "user has explicitly confirmed. If the user asks to see a place on the map " +
+    "without asking for directions, call openPlaceOnMap instead, which keeps the " +
+    "conversation going.";
+
+  if (session.landmarks && session.landmarks.length > 0) {
+    text += "\n\n" + buildLandmarksSkeletonText(session.landmarks);
+  }
+
+  if (session.nearbyDetailsText) {
+    text += "\n\n" + session.nearbyDetailsText;
+  }
+
+  return text;
+}
+
 // ============================================================
 // Configuration
 // ============================================================
@@ -101,31 +180,19 @@ wss.on("connection", (clientSocket) => {
   // ==========================================================
 
   const session = {
-    authed: true,
+    authed: false,
     uid: "solo-test-user",
+    lang: "ka",
     geminiSocket: null,
     currentLocation: null,
     landmarks: null,
+    nearbyDetailsText: null,
     resumptionToken: null,
     reconnecting: false,
     landmarksInjected: false,
   };
 
-  console.log("client authed: solo-test-user");
-
-  // ==========================================================
-  // Tell React Native that test authentication succeeded
-  // ==========================================================
-
-  sendToClient(clientSocket, {
-    type: "auth_ok",
-  });
-
-  // ==========================================================
-  // Immediately connect to Gemini Live
-  // ==========================================================
-
-  connectToGeminiLive(clientSocket, session);
+  console.log("client connected — waiting for auth before Gemini connect");
 
   // ==========================================================
   // Messages from React Native client
@@ -143,13 +210,32 @@ wss.on("connection", (clientSocket) => {
     }
 
     // ========================================================
-    // Ignore auth message from frontend
+    // Auth — also carries the app language for system prompt
     // ========================================================
 
     if (msg.type === "auth") {
       console.log("Test client auth message received — Firebase auth skipped");
 
+      session.authed = true;
+
+      if (msg.lang) {
+        session.lang = msg.lang;
+        console.log(`Client language: ${session.lang}`);
+      }
+
+      sendToClient(clientSocket, {
+        type: "auth_ok",
+      });
+
+      if (!session.geminiSocket && !session.reconnecting) {
+        connectToGeminiLive(clientSocket, session);
+      }
+
       return;
+    }
+
+    if (!session.authed) {
+      return sendError(clientSocket, "Not authenticated — send auth first");
     }
 
     // ========================================================
@@ -222,10 +308,19 @@ wss.on("connection", (clientSocket) => {
         session.currentLocation =
           msg.currentLocation || session.currentLocation;
 
-        if (msg.landmarks && msg.landmarks.length > 0) {
-          session.landmarks = msg.landmarks;
+        if (msg.lang) {
+          session.lang = msg.lang;
+        }
 
-          const skeletonText = buildLandmarksSkeletonText(msg.landmarks);
+        if (msg.landmarks && msg.landmarks.length > 0) {
+          session.landmarks = msg.landmarks.map((l) => ({
+            title: l.title,
+            type: l.type,
+            description: l.description,
+            alternateTitles: l.alternateTitles || [],
+          }));
+
+          const skeletonText = buildLandmarksSkeletonText(session.landmarks);
 
           const fullContext = `[SYSTEM CONTEXT — not spoken by user]\n${skeletonText}`;
 
@@ -250,6 +345,43 @@ wss.on("connection", (clientSocket) => {
             );
           } catch (error) {
             console.error("Failed to send landmark context:", error.message);
+          }
+        }
+
+        // Pre-loaded full descriptions for the nearest landmarks —
+        // avoids a getLandmarkDetails round-trip for common questions.
+        if (msg.nearbyLandmarks && msg.nearbyLandmarks.length > 0) {
+          session.nearbyDetailsText = buildNearbyDetailsText(
+            msg.nearbyLandmarks,
+          );
+
+          const nearbyDetailsContext =
+            `[SYSTEM CONTEXT — not spoken by user]\n` + session.nearbyDetailsText;
+
+          try {
+            session.geminiSocket.send(
+              JSON.stringify({
+                clientContent: {
+                  turns: [
+                    {
+                      role: "user",
+                      parts: [{ text: nearbyDetailsContext }],
+                    },
+                  ],
+                  turnComplete: false,
+                },
+              }),
+            );
+            console.log(
+              "📍 Nearby landmark details pre-loaded:",
+              msg.nearbyLandmarks.length,
+              "items",
+            );
+          } catch (error) {
+            console.error(
+              "Failed to send nearby landmark details:",
+              error.message,
+            );
           }
         }
 
@@ -462,9 +594,9 @@ function connectToGeminiLive(clientSocket, session) {
           automaticActivityDetection: {
             disabled: false,
             startOfSpeechSensitivity: "START_SENSITIVITY_LOW",
-            endOfSpeechSensitivity: "END_SENSITIVITY_LOW",
+            endOfSpeechSensitivity: "END_SENSITIVITY_HIGH",
             prefixPaddingMs: 300,
-            silenceDurationMs: 600,
+            silenceDurationMs: 1000,
           },
         },
 
@@ -497,10 +629,7 @@ function connectToGeminiLive(clientSocket, session) {
         systemInstruction: {
           parts: [
             {
-              text:
-                "You are a concise Tbilisi tour guide in a real-time voice conversation. " +
-                "Wait for the user to speak first — do not say anything until the user speaks. " +
-                "Once the user speaks, match their language exactly. " +
+              text: buildSystemInstruction(session),
                 "When speaking Georgian and referring to a century, always use " +
                 "the correct ordinal form (e.g. 'მეცამეტე საუკუნე', not " +
                 "'ცამეტი საუკუნე' or 'ცამეტს საუკუნეს'). " +
@@ -514,7 +643,7 @@ function connectToGeminiLive(clientSocket, session) {
                 "say why each is worth seeing. " +
                 "After you finish describing a specific landmark in any detail, ask the user " +
                 "if they'd like to see it on the map with directions (e.g. 'Would you like " +
-                "directions there?'). If they confirm (\"yes\", \"show me\", \"sure\", etc.), " +
+                'directions there?\'). If they confirm ("yes", "show me", "sure", etc.), ' +
                 "call showRouteToPlace with that landmark's name — do not call it unless the " +
                 "user has explicitly confirmed. If the user asks to see a place on the map " +
                 "without asking for directions, call openPlaceOnMap instead, which keeps the " +
@@ -622,7 +751,10 @@ function connectToGeminiLive(clientSocket, session) {
           // Send action to React Native
           // ----------------------------------------------
 
-          if (call.name === "openPlaceOnMap" || call.name === "showRouteToPlace") {
+          if (
+            call.name === "openPlaceOnMap" ||
+            call.name === "showRouteToPlace"
+          ) {
             sendToClient(clientSocket, {
               type: "action",
               name: call.name,
