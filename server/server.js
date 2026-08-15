@@ -485,9 +485,9 @@ function connectToGeminiLive(clientSocket, session) {
           automaticActivityDetection: {
             disabled: false,
             startOfSpeechSensitivity: "START_SENSITIVITY_LOW",
-            endOfSpeechSensitivity: "END_SENSITIVITY_MEDIUM",
+            endOfSpeechSensitivity: "END_SENSITIVITY_LOW",
             prefixPaddingMs: 300,
-            silenceDurationMs: 1200,
+            silenceDurationMs: 800,
           },
         },
 
