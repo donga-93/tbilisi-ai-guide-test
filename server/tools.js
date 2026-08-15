@@ -221,6 +221,12 @@ async function fetchNearbyPlaces(location, category, keyword, maxResults) {
   return { results };
 }
 
+// ⬅️ Shared by getLandmarkDetails, openPlaceOnMap, and showRouteToPlace.
+// Previously only getLandmarkDetails used this — openPlaceOnMap and
+// showRouteToPlace trusted Gemini's raw args.placeId unchecked, which
+// meant a translated/transliterated name (e.g. "narikala" instead of
+// the Georgian title actually stored in session.landmarks) silently
+// failed to resolve on the client with no error surfaced anywhere.
 function findLandmarkByTitle(landmarks, rawQuery) {
   const query = (rawQuery || "").toLowerCase().trim();
 
@@ -235,7 +241,7 @@ function findLandmarkByTitle(landmarks, rawQuery) {
 
   if (exact) {
     console.log(
-      `getLandmarkDetails: "${rawQuery}" → exact match "${exact.title}"`,
+      `findLandmarkByTitle: "${rawQuery}" → exact match "${exact.title}"`,
     );
     return exact;
   }
@@ -255,7 +261,7 @@ function findLandmarkByTitle(landmarks, rawQuery) {
   const matched = best && bestScore >= MIN_TITLE_MATCH_SCORE ? best : null;
 
   console.log(
-    `getLandmarkDetails: "${rawQuery}" → ` +
+    `findLandmarkByTitle: "${rawQuery}" → ` +
       (matched
         ? `fuzzy match "${matched.title}" (score ${bestScore.toFixed(2)})`
         : `no match above threshold (best score ${bestScore.toFixed(2)}${best ? `, closest was "${best.title}"` : ""})`),
@@ -263,6 +269,7 @@ function findLandmarkByTitle(landmarks, rawQuery) {
 
   return matched;
 }
+
 const toolDeclarations = [
   {
     functionDeclarations: [
@@ -317,7 +324,10 @@ const toolDeclarations = [
             placeId: {
               type: "STRING",
               description:
-                'The Firebase placeId or a well-known place name (e.g. "narikala").',
+                "The landmark's exact name as it appears in the landmarks list you were given " +
+                "for this session — same language, same spelling. Do not translate or " +
+                "transliterate it into another script or alphabet, even if the conversation " +
+                "itself is happening in a different language.",
             },
           },
           required: ["placeId"],
@@ -336,7 +346,10 @@ const toolDeclarations = [
             placeId: {
               type: "STRING",
               description:
-                'The Firebase placeId or the landmark name as discussed, e.g. "Narikala Fortress".',
+                "The landmark's exact name as it appears in the landmarks list you were given " +
+                "for this session — same language, same spelling. Do not translate or " +
+                "transliterate it into another script or alphabet, even if the conversation " +
+                "itself is happening in a different language.",
             },
           },
           required: ["placeId"],
@@ -351,7 +364,11 @@ const toolDeclarations = [
           properties: {
             title: {
               type: "STRING",
-              description: 'The landmark\'s name, e.g. "Narikala Fortress".',
+              description:
+                "The landmark's exact name as it appears in the landmarks list you were given " +
+                "for this session — same language, same spelling. Do not translate or " +
+                "transliterate it into another script or alphabet, even if the conversation " +
+                "itself is happening in a different language.",
             },
           },
           required: ["title"],
@@ -369,8 +386,11 @@ const toolDeclarations = [
  * findNearbyPlaces resolves data server-side (Google Places API) and returns it to Gemini,
  * for any of the categories in PLACE_CATEGORIES (restaurant, hotel, nightlife, shopping,
  * store, cafe, gas_station, pharmacy, park, transport, atm).
- * openPlaceOnMap is different: the map lives on the client, so beyond acking the call, the
- * proxy also forwards a UI action event to the client — see server.js handleToolCall.
+ * openPlaceOnMap and showRouteToPlace resolve the requested name against session.landmarks
+ * via findLandmarkByTitle before acking — the map lives on the client, so beyond validating
+ * the match, the proxy also forwards a UI action event to the client (see server.js's
+ * toolCall handler, which only does so when found !== false, and forwards the resolved
+ * exact title rather than Gemini's raw args).
  * getLandmarkDetails looks up a full description from session.landmarks, which the client
  * sends once at session start alongside the lightweight skeleton context.
  */
@@ -395,16 +415,58 @@ async function executeTool(name, args, session) {
       );
     }
     case "openPlaceOnMap": {
-      // No data to hand back to Gemini beyond an ack — the actual map action is
-      // dispatched to the client separately (see handleToolCall in server.js).
-      return { ok: true, placeId: args.placeId };
+      // ⬅️ FIX (items #2/#5/#6/#7): previously this returned
+      // { ok: true, placeId: args.placeId } unconditionally — Gemini's
+      // raw string, never checked against session.landmarks. If Gemini
+      // echoed back a translated/transliterated name, the client's own
+      // title-matching in map.tsx would silently fail to find a marker,
+      // while Gemini (having received ok:true) confidently told the user
+      // it had opened the map. Now resolved through the same
+      // findLandmarkByTitle used by getLandmarkDetails, so a failure is
+      // reported honestly instead of faked.
+      const landmark = findLandmarkByTitle(session.landmarks, args.placeId);
+
+      if (!landmark) {
+        console.warn(
+          `openPlaceOnMap: no match for "${args.placeId}" — available: ` +
+            (session.landmarks || []).map((l) => l.title).join(", "),
+        );
+
+        return {
+          found: false,
+          message:
+            `"${args.placeId}" ვერ მოიძებნა რუკაზე საჩვენებლად. ` +
+            `ხელმისაწვდომი ღირსშესანიშნაობებია: ` +
+            (session.landmarks || []).map((l) => l.title).join(", "),
+        };
+      }
+
+      return { ok: true, found: true, title: landmark.title };
     }
     case "showRouteToPlace": {
-      // Same shape as openPlaceOnMap — the client distinguishes them by
-      // action name (server.js forwards both as "action" messages) and
-      // reacts differently: showRouteToPlace also closes the Live modal
-      // and triggers route drawing, openPlaceOnMap just re-centers the map.
-      return { ok: true, placeId: args.placeId };
+      // Same resolution/shape as openPlaceOnMap — the client distinguishes
+      // the two by action name (server.js forwards both as "action"
+      // messages) and reacts differently: showRouteToPlace also closes
+      // the Live modal and triggers route drawing, openPlaceOnMap just
+      // re-centers the map.
+      const landmark = findLandmarkByTitle(session.landmarks, args.placeId);
+
+      if (!landmark) {
+        console.warn(
+          `showRouteToPlace: no match for "${args.placeId}" — available: ` +
+            (session.landmarks || []).map((l) => l.title).join(", "),
+        );
+
+        return {
+          found: false,
+          message:
+            `"${args.placeId}" ვერ მოიძებნა. ` +
+            `ხელმისაწვდომი ღირსშესანიშნაობებია: ` +
+            (session.landmarks || []).map((l) => l.title).join(", "),
+        };
+      }
+
+      return { ok: true, found: true, title: landmark.title };
     }
     case "getLandmarkDetails": {
       const landmark = findLandmarkByTitle(session.landmarks, args.title);
