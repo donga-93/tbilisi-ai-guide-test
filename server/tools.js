@@ -67,6 +67,172 @@ function scoreTitleMatch(query, title) {
 // 2) Fallback: fuzzy word-level score across all landmarks, tolerant
 //    of Georgian case-ending variation. Logs the decision so live
 //    testing (Task 2) can confirm Gemini's calls are resolving right.
+function findLandmarkByTitle(landmarks, rawQuery) {
+  const query = (rawQuery || "").toLowerCase().trim();
+
+  if (!query || !landmarks || landmarks.length === 0) {
+    return null;
+  }
+
+  const exact = landmarks.find((l) => {
+    const title = l.title.toLowerCase();
+    return title.includes(query) || query.includes(title);
+  });
+
+  if (exact) {
+    console.log(
+      `findLandmarkByTitle: "${rawQuery}" → exact match "${exact.title}"`,
+    );
+    return exact;
+  }
+
+  let best = null;
+  let bestScore = 0;
+
+  for (const l of landmarks) {
+    const score = scoreTitleMatch(query, l.title);
+
+    if (score > bestScore) {
+      bestScore = score;
+      best = l;
+    }
+  }
+
+  const matched = best && bestScore >= MIN_TITLE_MATCH_SCORE ? best : null;
+
+  console.log(
+    `findLandmarkByTitle: "${rawQuery}" → ` +
+      (matched
+        ? `fuzzy match "${matched.title}" (score ${bestScore.toFixed(2)})`
+        : `no match above threshold (best score ${bestScore.toFixed(2)}${best ? `, closest was "${best.title}"` : ""})`),
+  );
+
+  return matched;
+}
+
+// ============================================================
+// Nearby-places cache (new)
+//
+// findNearbyPlaces used to hand Gemini a name/address/rating/
+// distanceMeters summary and then forget the underlying Google
+// Places results entirely — so if the user later said "open that
+// on the map" / "show me directions there", there was no coordinate
+// data anywhere to resolve it against (session.landmarks only ever
+// holds the 23 curated Firestore landmarks, never Google search
+// results). Caching each findNearbyPlaces call's results (with id +
+// location) in the session lets openPlaceOnMap/showRouteToPlace
+// resolve those too, not just landmarks.
+// ============================================================
+
+const NEARBY_CACHE_MAX_ENTRIES = 40;
+
+function cacheNearbyPlaces(session, entries) {
+  if (!entries || entries.length === 0) return;
+
+  if (!session.nearbyPlacesCache) {
+    session.nearbyPlacesCache = [];
+  }
+
+  const existingIds = new Set(session.nearbyPlacesCache.map((e) => e.id));
+
+  for (const entry of entries) {
+    if (!existingIds.has(entry.id)) {
+      session.nearbyPlacesCache.push(entry);
+    }
+  }
+
+  // Keeps the cache from growing unbounded across a long session —
+  // only the most recently seen entries stay resolvable, which is
+  // fine since the user is realistically only going to ask about
+  // something they were just told about.
+  if (session.nearbyPlacesCache.length > NEARBY_CACHE_MAX_ENTRIES) {
+    session.nearbyPlacesCache = session.nearbyPlacesCache.slice(
+      -NEARBY_CACHE_MAX_ENTRIES,
+    );
+  }
+}
+
+function findCachedPlaceByName(cache, rawQuery) {
+  const query = (rawQuery || "").toLowerCase().trim();
+
+  if (!query || !cache || cache.length === 0) {
+    return null;
+  }
+
+  const exact = cache.find((p) => {
+    const name = (p.name || "").toLowerCase();
+    return name.includes(query) || query.includes(name);
+  });
+
+  if (exact) {
+    console.log(
+      `findCachedPlaceByName: "${rawQuery}" → exact match "${exact.name}"`,
+    );
+    return exact;
+  }
+
+  let best = null;
+  let bestScore = 0;
+
+  for (const p of cache) {
+    const score = scoreTitleMatch(query, p.name || "");
+
+    if (score > bestScore) {
+      bestScore = score;
+      best = p;
+    }
+  }
+
+  const matched = best && bestScore >= MIN_TITLE_MATCH_SCORE ? best : null;
+
+  console.log(
+    `findCachedPlaceByName: "${rawQuery}" → ` +
+      (matched
+        ? `fuzzy match "${matched.name}" (score ${bestScore.toFixed(2)})`
+        : `no match above threshold (best score ${bestScore.toFixed(2)}${best ? `, closest was "${best.name}"` : ""})`),
+  );
+
+  return matched;
+}
+
+// ============================================================
+// Unified place resolution for openPlaceOnMap / showRouteToPlace
+//
+// Tries session.landmarks first (curated Firestore landmarks — the
+// client already has full data for these and just needs the exact
+// title back), then falls back to session.nearbyPlacesCache (Google
+// Places results from a prior findNearbyPlaces call — the client has
+// NO other source for these, so we hand back full coordinates too).
+// ============================================================
+
+function resolvePlaceReference(session, rawQuery) {
+  const landmark = findLandmarkByTitle(session.landmarks, rawQuery);
+
+  if (landmark) {
+    return {
+      found: true,
+      source: "landmark",
+      title: landmark.title,
+    };
+  }
+
+  const cached = findCachedPlaceByName(session.nearbyPlacesCache, rawQuery);
+
+  if (cached) {
+    return {
+      found: true,
+      source: "google",
+      title: cached.name,
+      coordinates: cached.location,
+      address: cached.address,
+      googlePlaceId: cached.id,
+      category: cached.category,
+    };
+  }
+
+  return { found: false };
+}
+
 // ============================================================
 // findNearbyPlaces (Task 3, generalized)
 //
@@ -129,6 +295,13 @@ function haversineMeters(a, b) {
 const PLACES_FIELD_MASK =
   "places.id,places.displayName,places.location,places.formattedAddress,places.rating";
 
+// ⬅️ CHANGE: now returns { results, cacheEntries } (or { error }) instead
+// of just { results }. `results` is still the lightweight shape sent to
+// Gemini (name/address/rating/distanceMeters — no need to spend tokens
+// on ids/coordinates the model itself never uses). `cacheEntries` carries
+// the id+location+category alongside, for cacheNearbyPlaces() to store
+// server-side so a later openPlaceOnMap/showRouteToPlace call can
+// resolve the same place by name.
 async function fetchNearbyPlaces(location, category, keyword, maxResults) {
   if (!GOOGLE_PLACES_API_KEY) {
     console.error("GOOGLE_PLACES_API_KEY is not set — check the server .env");
@@ -207,67 +380,26 @@ async function fetchNearbyPlaces(location, category, keyword, maxResults) {
     return { error: "place_search_failed" };
   }
 
-  const results = places
+  const enriched = places
     .filter((p) => p.location)
     .map((p) => ({
+      id: p.id,
       name: p.displayName?.text || "Unknown",
       address: p.formattedAddress,
       rating: p.rating,
+      location: p.location,
+      category,
       distanceMeters: Math.round(haversineMeters(location, p.location)),
     }))
     .sort((a, b) => a.distanceMeters - b.distanceMeters)
     .slice(0, maxResults);
 
-  return { results };
-}
-
-// ⬅️ Shared by getLandmarkDetails, openPlaceOnMap, and showRouteToPlace.
-// Previously only getLandmarkDetails used this — openPlaceOnMap and
-// showRouteToPlace trusted Gemini's raw args.placeId unchecked, which
-// meant a translated/transliterated name (e.g. "narikala" instead of
-// the Georgian title actually stored in session.landmarks) silently
-// failed to resolve on the client with no error surfaced anywhere.
-function findLandmarkByTitle(landmarks, rawQuery) {
-  const query = (rawQuery || "").toLowerCase().trim();
-
-  if (!query || !landmarks || landmarks.length === 0) {
-    return null;
-  }
-
-  const exact = landmarks.find((l) => {
-    const title = l.title.toLowerCase();
-    return title.includes(query) || query.includes(title);
-  });
-
-  if (exact) {
-    console.log(
-      `findLandmarkByTitle: "${rawQuery}" → exact match "${exact.title}"`,
-    );
-    return exact;
-  }
-
-  let best = null;
-  let bestScore = 0;
-
-  for (const l of landmarks) {
-    const score = scoreTitleMatch(query, l.title);
-
-    if (score > bestScore) {
-      bestScore = score;
-      best = l;
-    }
-  }
-
-  const matched = best && bestScore >= MIN_TITLE_MATCH_SCORE ? best : null;
-
-  console.log(
-    `findLandmarkByTitle: "${rawQuery}" → ` +
-      (matched
-        ? `fuzzy match "${matched.title}" (score ${bestScore.toFixed(2)})`
-        : `no match above threshold (best score ${bestScore.toFixed(2)}${best ? `, closest was "${best.title}"` : ""})`),
-  );
-
-  return matched;
+  return {
+    results: enriched.map(
+      ({ id, location: _location, category: _category, ...rest }) => rest,
+    ),
+    cacheEntries: enriched,
+  };
 }
 
 const toolDeclarations = [
@@ -278,7 +410,9 @@ const toolDeclarations = [
         description:
           "Finds places of a given category near the user's current location, sorted by distance. " +
           "Use this for restaurants, hotels, nightlife (bars/clubs), shopping malls, general stores, " +
-          "cafes, gas stations, pharmacies, parks, public transport stops, or ATMs.",
+          "cafes, gas stations, pharmacies, parks, public transport stops, or ATMs. " +
+          "After telling the user about a result, you can call openPlaceOnMap or showRouteToPlace " +
+          "with that result's exact name if the user wants to see it on the map or get directions.",
         parameters: {
           type: "OBJECT",
           properties: {
@@ -317,17 +451,17 @@ const toolDeclarations = [
       {
         name: "openPlaceOnMap",
         description:
-          "Focuses the in-app map on a named place so the user can see where it is, without ending the conversation. Call this whenever the user asks to see, open, or be taken to a place mid-conversation.",
+          "Focuses the in-app map on a named place so the user can see where it is, without ending the conversation. Call this whenever the user asks to see, open, or be taken to a place mid-conversation — whether it's one of the landmarks you were given, or a place you found for them via findNearbyPlaces.",
         parameters: {
           type: "OBJECT",
           properties: {
             placeId: {
               type: "STRING",
               description:
-                "The landmark's exact name as it appears in the landmarks list you were given " +
-                "for this session — same language, same spelling. Do not translate or " +
-                "transliterate it into another script or alphabet, even if the conversation " +
-                "itself is happening in a different language.",
+                "The place's exact name, exactly as it appeared either in the landmarks list you " +
+                "were given for this session, or in a findNearbyPlaces result — same language, " +
+                "same spelling. Do not translate or transliterate it into another script or " +
+                "alphabet, even if the conversation itself is happening in a different language.",
             },
           },
           required: ["placeId"],
@@ -337,19 +471,21 @@ const toolDeclarations = [
         name: "showRouteToPlace",
         description:
           "Ends the voice conversation, switches to the map, and draws a route from the user's " +
-          "current location to the named place. Only call this after you have discussed a specific " +
-          "landmark and the user has explicitly confirmed they want directions/to see it on the map " +
-          '(e.g. they said "yes", "show me", "sure"). Do not call this speculatively — always ask first.',
+          "current location to the named place — whether it's one of the landmarks you were given, " +
+          "or a place you found for them via findNearbyPlaces. Only call this after you have " +
+          "discussed a specific place and the user has explicitly confirmed they want directions/to " +
+          'see it on the map (e.g. they said "yes", "show me", "sure"). Do not call this ' +
+          "speculatively — always ask first.",
         parameters: {
           type: "OBJECT",
           properties: {
             placeId: {
               type: "STRING",
               description:
-                "The landmark's exact name as it appears in the landmarks list you were given " +
-                "for this session — same language, same spelling. Do not translate or " +
-                "transliterate it into another script or alphabet, even if the conversation " +
-                "itself is happening in a different language.",
+                "The place's exact name, exactly as it appeared either in the landmarks list you " +
+                "were given for this session, or in a findNearbyPlaces result — same language, " +
+                "same spelling. Do not translate or transliterate it into another script or " +
+                "alphabet, even if the conversation itself is happening in a different language.",
             },
           },
           required: ["placeId"],
@@ -380,17 +516,20 @@ const toolDeclarations = [
 
 /**
  * Executes a tool call from Gemini and returns the result to send back as a functionResponse.
- * `session` carries per-connection context (currentLocation, landmarks, etc. — wired in
- * via the "context" message from GeminiLiveModal.tsx; see server.js).
+ * `session` carries per-connection context (currentLocation, landmarks, nearbyPlacesCache, etc.
+ * — wired in via the "context" message from GeminiLiveModal.tsx and via findNearbyPlaces calls
+ * themselves; see server.js).
  *
- * findNearbyPlaces resolves data server-side (Google Places API) and returns it to Gemini,
- * for any of the categories in PLACE_CATEGORIES (restaurant, hotel, nightlife, shopping,
- * store, cafe, gas_station, pharmacy, park, transport, atm).
- * openPlaceOnMap and showRouteToPlace resolve the requested name against session.landmarks
- * via findLandmarkByTitle before acking — the map lives on the client, so beyond validating
- * the match, the proxy also forwards a UI action event to the client (see server.js's
- * toolCall handler, which only does so when found !== false, and forwards the resolved
- * exact title rather than Gemini's raw args).
+ * findNearbyPlaces resolves data server-side (Google Places API), caches it (with coordinates)
+ * in session.nearbyPlacesCache, and returns a lightweight summary to Gemini, for any of the
+ * categories in PLACE_CATEGORIES (restaurant, hotel, nightlife, shopping, store, cafe,
+ * gas_station, pharmacy, park, transport, atm).
+ * openPlaceOnMap and showRouteToPlace resolve the requested name against BOTH session.landmarks
+ * and session.nearbyPlacesCache via resolvePlaceReference before acking — the map lives on the
+ * client, so beyond validating the match, the proxy also forwards a UI action event to the
+ * client (see server.js's toolCall handler, which only does so when found !== false, and
+ * forwards the resolved title — plus coordinates, for Google-sourced results the client has no
+ * other way to look up).
  * getLandmarkDetails looks up a full description from session.landmarks, which the client
  * sends once at session start alongside the lightweight skeleton context.
  */
@@ -407,53 +546,35 @@ async function executeTool(name, args, session) {
 
       const maxResults = args.maxResults || DEFAULT_MAX_RESULTS;
 
-      return fetchNearbyPlaces(
+      const { results, cacheEntries, error } = await fetchNearbyPlaces(
         session.currentLocation,
         args.category,
         args.keyword,
         maxResults,
       );
-    }
-    case "openPlaceOnMap": {
-      // ⬅️ FIX (items #2/#5/#6/#7): previously this returned
-      // { ok: true, placeId: args.placeId } unconditionally — Gemini's
-      // raw string, never checked against session.landmarks. If Gemini
-      // echoed back a translated/transliterated name, the client's own
-      // title-matching in map.tsx would silently fail to find a marker,
-      // while Gemini (having received ok:true) confidently told the user
-      // it had opened the map. Now resolved through the same
-      // findLandmarkByTitle used by getLandmarkDetails, so a failure is
-      // reported honestly instead of faked.
-      const landmark = findLandmarkByTitle(session.landmarks, args.placeId);
 
-      if (!landmark) {
-        console.warn(
-          `openPlaceOnMap: no match for "${args.placeId}" — available: ` +
-            (session.landmarks || []).map((l) => l.title).join(", "),
-        );
-
-        return {
-          found: false,
-          message:
-            `"${args.placeId}" ვერ მოიძებნა რუკაზე საჩვენებლად. ` +
-            `ხელმისაწვდომი ღირსშესანიშნაობებია: ` +
-            (session.landmarks || []).map((l) => l.title).join(", "),
-        };
+      if (error) {
+        return { error };
       }
 
-      return { ok: true, found: true, title: landmark.title };
-    }
-    case "showRouteToPlace": {
-      // Same resolution/shape as openPlaceOnMap — the client distinguishes
-      // the two by action name (server.js forwards both as "action"
-      // messages) and reacts differently: showRouteToPlace also closes
-      // the Live modal and triggers route drawing, openPlaceOnMap just
-      // re-centers the map.
-      const landmark = findLandmarkByTitle(session.landmarks, args.placeId);
+      cacheNearbyPlaces(session, cacheEntries);
 
-      if (!landmark) {
+      return { results };
+    }
+    case "openPlaceOnMap":
+    case "showRouteToPlace": {
+      // ⬅️ FIX: both actions now resolve through resolvePlaceReference,
+      // which checks session.landmarks AND session.nearbyPlacesCache —
+      // previously only openPlaceOnMap/showRouteToPlace against curated
+      // landmarks worked at all; a findNearbyPlaces result (a restaurant,
+      // cafe, etc.) had no coordinates stored anywhere and could never be
+      // marked on the map, and any mismatch (translated/transliterated
+      // name) used to still return a blind ok:true.
+      const resolved = resolvePlaceReference(session, args.placeId);
+
+      if (!resolved.found) {
         console.warn(
-          `showRouteToPlace: no match for "${args.placeId}" — available: ` +
+          `${name}: no match for "${args.placeId}" — available landmarks: ` +
             (session.landmarks || []).map((l) => l.title).join(", "),
         );
 
@@ -466,7 +587,7 @@ async function executeTool(name, args, session) {
         };
       }
 
-      return { ok: true, found: true, title: landmark.title };
+      return { ok: true, ...resolved };
     }
     case "getLandmarkDetails": {
       const landmark = findLandmarkByTitle(session.landmarks, args.title);

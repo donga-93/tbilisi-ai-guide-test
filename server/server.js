@@ -99,14 +99,14 @@ wss.on("connection", (clientSocket) => {
   // Firebase authentication is intentionally disabled.
   // Only you are testing the application at this stage.
   //
-  // ⬅️ CHANGE: session.authed now starts false and the actual
-  // connection to Gemini Live is deferred until the client's
-  // "auth" message arrives (see the message handler below).
-  // This is what lets us capture preferredLanguage BEFORE the
-  // Gemini setup message (with its systemInstruction) is built —
-  // previously connectToGeminiLive() fired immediately on socket
-  // connect, so any language preference sent afterward could
-  // never make it into the initial systemInstruction.
+  // session.authed starts false and the actual connection to
+  // Gemini Live is deferred until the client's "auth" message
+  // arrives (see the message handler below). This is what lets
+  // us capture preferredLanguage BEFORE the Gemini setup message
+  // (with its systemInstruction) is built — connecting to Gemini
+  // immediately on socket connect would mean any language
+  // preference sent afterward could never make it into the
+  // initial systemInstruction.
   // ==========================================================
 
   const session = {
@@ -115,6 +115,7 @@ wss.on("connection", (clientSocket) => {
     geminiSocket: null,
     currentLocation: null,
     landmarks: null,
+    nearbyPlacesCache: null,
     resumptionToken: null,
     reconnecting: false,
     landmarksInjected: false,
@@ -327,13 +328,6 @@ wss.on("connection", (clientSocket) => {
                       ],
                     },
                   ],
-                  // ⬅️ FIX: this branch was missing turnComplete: false,
-                  // unlike the landmarks/nearbyLandmarks branches above.
-                  // Not currently reachable from the client (nothing
-                  // sends {type:"context", text:...} yet), but left as
-                  // an open turn it could make Gemini treat this silent
-                  // context push as a completed user turn and respond
-                  // out loud to it once this path is used.
                   turnComplete: false,
                 },
               }),
@@ -556,23 +550,27 @@ function connectToGeminiLive(clientSocket, session) {
                 "You only have landmark names and types below, not full " +
                 "descriptions — call getLandmarkDetails whenever the user " +
                 "asks about a specific landmark's history or details. " +
+                "You can also find nearby restaurants, cafes, hotels, shops, and similar " +
+                "places with findNearbyPlaces — you are not limited to the landmarks list " +
+                "for map/directions actions. " +
                 "When you call getLandmarkDetails, openPlaceOnMap, or showRouteToPlace, " +
-                "always pass the landmark's name exactly as it appears in the list below — " +
-                "same language, same spelling. Do not translate or transliterate it into " +
-                "another script, even if the conversation itself is in a different language. " +
+                "always pass the place's name exactly as it appeared — either in the " +
+                "landmarks list below, or in a findNearbyPlaces result — same language, " +
+                "same spelling. Do not translate or transliterate it into another script, " +
+                "even if the conversation itself is in a different language. " +
                 "If the user asks what's interesting nearby, suggest a couple of the " +
                 "closest landmarks below (they're already ordered by distance) and briefly " +
                 "say why each is worth seeing. " +
-                "After you finish describing a specific landmark in any detail, ask the user " +
+                "After you finish describing a specific place in any detail, ask the user " +
                 "if they'd like to see it on the map with directions (e.g. 'Would you like " +
                 'directions there?\'). If they confirm ("yes", "show me", "sure", etc.), ' +
-                "call showRouteToPlace with that landmark's name — do not call it unless the " +
+                "call showRouteToPlace with that place's name — do not call it unless the " +
                 "user has explicitly confirmed. If the user asks to see a place on the map " +
                 "without asking for directions, call openPlaceOnMap instead, which keeps the " +
                 "conversation going." +
                 "If getLandmarkDetails, openPlaceOnMap, or showRouteToPlace returns found:false, " +
                 "do NOT say you could not find information or open the map. " +
-                "Instead, apologize briefly and offer to tell the user about a similar nearby landmark. " +
+                "Instead, apologize briefly and offer to tell the user about a similar nearby place. " +
                 (session.landmarks && session.landmarks.length > 0
                   ? "\n\n" + buildLandmarksSkeletonText(session.landmarks)
                   : ""),
@@ -675,18 +673,18 @@ function connectToGeminiLive(clientSocket, session) {
           // ----------------------------------------------
           // Send action to React Native
           //
-          // ⬅️ FIX (item #6): previously this fired unconditionally
-          // with Gemini's raw, unvalidated args.placeId — even when
-          // that string didn't resolve to any known landmark, so the
-          // client (and Gemini, via the toolResponse's ok:true) both
-          // believed the map had opened when nothing was actually
-          // shown. Now:
-          //   - only sent when executeTool actually resolved a match
-          //     (result.found !== false — see tools.js)
-          //   - args.placeId is replaced with the resolved, exact
-          //     landmark title from session.landmarks, so the client's
-          //     own title-matching in map.tsx has a clean, guaranteed
-          //     match instead of Gemini's possibly-translated guess.
+          // Only sent when executeTool actually resolved a match
+          // (result.found !== false — see tools.js). The payload
+          // now carries more than just a name: for a landmark
+          // match (result.source === "landmark") the client still
+          // resolves coordinates itself from its local Firestore
+          // `places` list, same as before — but for a Google-
+          // sourced match (result.source === "google", from a
+          // findNearbyPlaces result) the client has NO other way
+          // to get coordinates, so they're forwarded directly
+          // (coordinates/address/googlePlaceId/category), letting
+          // map.tsx build and show a marker for places that were
+          // never in its local landmarks list at all.
           // ----------------------------------------------
 
           if (
@@ -698,8 +696,12 @@ function connectToGeminiLive(clientSocket, session) {
               type: "action",
               name: call.name,
               args: {
-                ...call.args,
                 placeId: result.title || call.args.placeId,
+                source: result.source,
+                coordinates: result.coordinates,
+                address: result.address,
+                googlePlaceId: result.googlePlaceId,
+                category: result.category,
               },
             });
           }
