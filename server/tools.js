@@ -1,16 +1,26 @@
 // Tool declarations sent to Gemini Live at session setup.
-// Gemini decides when to call these mid-conversation based on what the user says.
+//
+// IMPORTANT:
+// Google Search is a BUILT-IN Gemini Live tool.
+// It is NOT declared here.
+//
+// It must be enabled in server.js like this:
+//
+// tools: [
+//   { googleSearch: {} },
+//   ...toolDeclarations,
+// ]
+//
+// This allows Gemini to search the live web when:
+// - the local landmark catalog does not contain the requested place
+// - current information is required
+// - the user asks about places, businesses, events, prices, hours, etc.
+//
+// Google Search is executed by Gemini itself.
+// There is therefore NO custom "webSearch" function in this file.
 
 // ============================================================
-// Fuzzy title matching (Task 2/4)
-//
-// Mirrors the proportional common-prefix approach already used
-// client-side in AiGuideAssistant.tsx (wordsMatch/commonPrefixLength):
-// Georgian grammatical case endings (-ის, -ში, -ზე, -თან, etc.) get
-// appended to a word's stem, so a plain substring check on the raw
-// title can miss valid matches. Comparing a proportional common
-// prefix instead of the whole word tolerates those endings without
-// needing real stemming.
+// Fuzzy title matching
 // ============================================================
 
 const MIN_COMMON_PREFIX_LENGTH = 3;
@@ -20,13 +30,18 @@ const MIN_TITLE_MATCH_SCORE = 0.6;
 function commonPrefixLength(a, b) {
   const maxLen = Math.min(a.length, b.length);
   let i = 0;
-  while (i < maxLen && a[i] === b[i]) i += 1;
+
+  while (i < maxLen && a[i] === b[i]) {
+    i += 1;
+  }
+
   return i;
 }
 
 function wordsMatch(a, b) {
   const prefixLen = commonPrefixLength(a, b);
   const shorterLen = Math.min(a.length, b.length);
+
   return (
     prefixLen >= MIN_COMMON_PREFIX_LENGTH &&
     prefixLen >= shorterLen * MIN_COMMON_PREFIX_RATIO
@@ -36,12 +51,10 @@ function wordsMatch(a, b) {
 function tokenize(text) {
   return text
     .toLowerCase()
-    .split(/[\s,.()!?;:„""-]+/)
+    .split(/[\s,.()!?;:„""\-]+/)
     .filter(Boolean);
 }
 
-// Fraction of query words that found a case-tolerant match somewhere
-// in the title. 1.0 = every query word matched something in the title.
 function scoreTitleMatch(query, title) {
   const queryWords = tokenize(query);
   const titleWords = tokenize(title);
@@ -61,12 +74,6 @@ function scoreTitleMatch(query, title) {
   return matchedCount / queryWords.length;
 }
 
-// Finds the best matching landmark for a free-form title query.
-// 1) Fast path: exact substring match either direction — handles the
-//    common case where Gemini echoes the title back verbatim.
-// 2) Fallback: fuzzy word-level score across all landmarks, tolerant
-//    of Georgian case-ending variation. Logs the decision so live
-//    testing (Task 2) can confirm Gemini's calls are resolving right.
 function findLandmarkByTitle(landmarks, rawQuery) {
   const query = (rawQuery || "").toLowerCase().trim();
 
@@ -74,8 +81,13 @@ function findLandmarkByTitle(landmarks, rawQuery) {
     return null;
   }
 
+  // ----------------------------------------------------------
+  // Exact substring match
+  // ----------------------------------------------------------
+
   const exact = landmarks.find((l) => {
-    const title = l.title.toLowerCase();
+    const title = (l.title || "").toLowerCase();
+
     return title.includes(query) || query.includes(title);
   });
 
@@ -83,14 +95,19 @@ function findLandmarkByTitle(landmarks, rawQuery) {
     console.log(
       `findLandmarkByTitle: "${rawQuery}" → exact match "${exact.title}"`,
     );
+
     return exact;
   }
+
+  // ----------------------------------------------------------
+  // Fuzzy match
+  // ----------------------------------------------------------
 
   let best = null;
   let bestScore = 0;
 
   for (const l of landmarks) {
-    const score = scoreTitleMatch(query, l.title);
+    const score = scoreTitleMatch(query, l.title || "");
 
     if (score > bestScore) {
       bestScore = score;
@@ -104,30 +121,24 @@ function findLandmarkByTitle(landmarks, rawQuery) {
     `findLandmarkByTitle: "${rawQuery}" → ` +
       (matched
         ? `fuzzy match "${matched.title}" (score ${bestScore.toFixed(2)})`
-        : `no match above threshold (best score ${bestScore.toFixed(2)}${best ? `, closest was "${best.title}"` : ""})`),
+        : `no match above threshold (best score ${bestScore.toFixed(2)}${
+            best ? `, closest was "${best.title}"` : ""
+          })`),
   );
 
   return matched;
 }
 
 // ============================================================
-// Nearby-places cache (new)
-//
-// findNearbyPlaces used to hand Gemini a name/address/rating/
-// distanceMeters summary and then forget the underlying Google
-// Places results entirely — so if the user later said "open that
-// on the map" / "show me directions there", there was no coordinate
-// data anywhere to resolve it against (session.landmarks only ever
-// holds the 23 curated Firestore landmarks, never Google search
-// results). Caching each findNearbyPlaces call's results (with id +
-// location) in the session lets openPlaceOnMap/showRouteToPlace
-// resolve those too, not just landmarks.
+// Nearby places cache
 // ============================================================
 
 const NEARBY_CACHE_MAX_ENTRIES = 40;
 
 function cacheNearbyPlaces(session, entries) {
-  if (!entries || entries.length === 0) return;
+  if (!entries || entries.length === 0) {
+    return;
+  }
 
   if (!session.nearbyPlacesCache) {
     session.nearbyPlacesCache = [];
@@ -136,15 +147,16 @@ function cacheNearbyPlaces(session, entries) {
   const existingIds = new Set(session.nearbyPlacesCache.map((e) => e.id));
 
   for (const entry of entries) {
+    if (!entry || !entry.id) {
+      continue;
+    }
+
     if (!existingIds.has(entry.id)) {
       session.nearbyPlacesCache.push(entry);
+      existingIds.add(entry.id);
     }
   }
 
-  // Keeps the cache from growing unbounded across a long session —
-  // only the most recently seen entries stay resolvable, which is
-  // fine since the user is realistically only going to ask about
-  // something they were just told about.
   if (session.nearbyPlacesCache.length > NEARBY_CACHE_MAX_ENTRIES) {
     session.nearbyPlacesCache = session.nearbyPlacesCache.slice(
       -NEARBY_CACHE_MAX_ENTRIES,
@@ -159,8 +171,13 @@ function findCachedPlaceByName(cache, rawQuery) {
     return null;
   }
 
+  // ----------------------------------------------------------
+  // Exact substring match
+  // ----------------------------------------------------------
+
   const exact = cache.find((p) => {
     const name = (p.name || "").toLowerCase();
+
     return name.includes(query) || query.includes(name);
   });
 
@@ -168,8 +185,13 @@ function findCachedPlaceByName(cache, rawQuery) {
     console.log(
       `findCachedPlaceByName: "${rawQuery}" → exact match "${exact.name}"`,
     );
+
     return exact;
   }
+
+  // ----------------------------------------------------------
+  // Fuzzy match
+  // ----------------------------------------------------------
 
   let best = null;
   let bestScore = 0;
@@ -189,20 +211,25 @@ function findCachedPlaceByName(cache, rawQuery) {
     `findCachedPlaceByName: "${rawQuery}" → ` +
       (matched
         ? `fuzzy match "${matched.name}" (score ${bestScore.toFixed(2)})`
-        : `no match above threshold (best score ${bestScore.toFixed(2)}${best ? `, closest was "${best.name}"` : ""})`),
+        : `no match above threshold (best score ${bestScore.toFixed(2)}${
+            best ? `, closest was "${best.name}"` : ""
+          })`),
   );
 
   return matched;
 }
 
 // ============================================================
-// Unified place resolution for openPlaceOnMap / showRouteToPlace
+// Unified place resolution
 //
-// Tries session.landmarks first (curated Firestore landmarks — the
-// client already has full data for these and just needs the exact
-// title back), then falls back to session.nearbyPlacesCache (Google
-// Places results from a prior findNearbyPlaces call — the client has
-// NO other source for these, so we hand back full coordinates too).
+// 1. Firestore landmark
+// 2. Previously discovered Google Places result
+//
+// IMPORTANT:
+// Google Search itself does not populate this cache.
+// If Gemini finds a place through Google Search and later needs
+// its coordinates for the map, Gemini should call
+// findNearbyPlaces to resolve it through Google Places.
 // ============================================================
 
 function resolvePlaceReference(session, rawQuery) {
@@ -230,58 +257,110 @@ function resolvePlaceReference(session, rawQuery) {
     };
   }
 
-  return { found: false };
+  return {
+    found: false,
+  };
 }
 
 // ============================================================
-// findNearbyPlaces (Task 3, generalized)
+// findNearbyPlaces
 //
-// Mirrors the Places API (New) pattern already used client-side
-// in map.tsx (searchNearbyPlaces/searchPlacesByText): POST with
-// X-Goog-Api-Key header + X-Goog-FieldMask, not the legacy
-// query-string Places API.
+// Uses Google Places API (New).
 //
-// Uses its own server-side key (GOOGLE_PLACES_API_KEY) rather than
-// the app-bundled EXPO_PUBLIC_GOOGLE_PLACES_REST_KEY — that one is
-// restricted to the app's bundle id/referrer, which a backend
-// server doesn't have, so it needs a separate key restricted by
-// server IP instead. Add GOOGLE_PLACES_API_KEY to the server's .env.
+// This is separate from Gemini's built-in Google Search.
 //
-// One generalized tool (category enum) instead of one function per
-// place type — restaurant, hotel, nightlife, shopping, store, cafe,
-// gas station, pharmacy, park, public transport, ATM all share the
-// exact same Places API mechanics; only the includedType differs.
+// findNearbyPlaces:
+// - nearby structured place discovery
+// - coordinates
+// - distance
+// - Google Place ID
+//
+// Google Search:
+// - general web information
+// - current facts
+// - opening hours
+// - prices
+// - reviews
+// - events
+// - history
+// - arbitrary factual information
 // ============================================================
 
 const GOOGLE_PLACES_API_KEY = process.env.GOOGLE_PLACES_API_KEY;
+
 const DEFAULT_SEARCH_RADIUS_METERS = 1500;
 const DEFAULT_MAX_RESULTS = 3;
 
-// category (what Gemini passes) → { Places API (New) includedType,
-// human-readable label used to build free-text searchText queries }
 const PLACE_CATEGORIES = {
-  restaurant: { includedType: "restaurant", label: "restaurant" },
-  hotel: { includedType: "lodging", label: "hotel" },
-  nightlife: { includedType: "night_club", label: "nightclub or bar" },
-  shopping: { includedType: "shopping_mall", label: "shopping mall" },
-  store: { includedType: "store", label: "store" },
-  cafe: { includedType: "cafe", label: "cafe" },
-  gas_station: { includedType: "gas_station", label: "gas station" },
-  pharmacy: { includedType: "pharmacy", label: "pharmacy" },
-  park: { includedType: "park", label: "park" },
+  restaurant: {
+    includedType: "restaurant",
+    label: "restaurant",
+  },
+
+  hotel: {
+    includedType: "lodging",
+    label: "hotel",
+  },
+
+  nightlife: {
+    includedType: "night_club",
+    label: "nightclub or bar",
+  },
+
+  shopping: {
+    includedType: "shopping_mall",
+    label: "shopping mall",
+  },
+
+  store: {
+    includedType: "store",
+    label: "store",
+  },
+
+  cafe: {
+    includedType: "cafe",
+    label: "cafe",
+  },
+
+  gas_station: {
+    includedType: "gas_station",
+    label: "gas station",
+  },
+
+  pharmacy: {
+    includedType: "pharmacy",
+    label: "pharmacy",
+  },
+
+  park: {
+    includedType: "park",
+    label: "park",
+  },
+
   transport: {
     includedType: "transit_station",
     label: "public transport station",
   },
-  atm: { includedType: "atm", label: "ATM" },
+
+  atm: {
+    includedType: "atm",
+    label: "ATM",
+  },
 };
+
+// ============================================================
+// Distance calculation
+// ============================================================
 
 function haversineMeters(a, b) {
   const R = 6371000;
+
   const toRad = (deg) => (deg * Math.PI) / 180;
 
   const dLat = toRad(b.latitude - a.latitude);
+
   const dLng = toRad(b.longitude - a.longitude);
+
   const lat1 = toRad(a.latitude);
   const lat2 = toRad(b.latitude);
 
@@ -292,20 +371,24 @@ function haversineMeters(a, b) {
   return 2 * R * Math.asin(Math.sqrt(h));
 }
 
+// ============================================================
+// Google Places fields
+// ============================================================
+
 const PLACES_FIELD_MASK =
   "places.id,places.displayName,places.location,places.formattedAddress,places.rating";
 
-// ⬅️ CHANGE: now returns { results, cacheEntries } (or { error }) instead
-// of just { results }. `results` is still the lightweight shape sent to
-// Gemini (name/address/rating/distanceMeters — no need to spend tokens
-// on ids/coordinates the model itself never uses). `cacheEntries` carries
-// the id+location+category alongside, for cacheNearbyPlaces() to store
-// server-side so a later openPlaceOnMap/showRouteToPlace call can
-// resolve the same place by name.
+// ============================================================
+// Google Places request
+// ============================================================
+
 async function fetchNearbyPlaces(location, category, keyword, maxResults) {
   if (!GOOGLE_PLACES_API_KEY) {
     console.error("GOOGLE_PLACES_API_KEY is not set — check the server .env");
-    return { error: "place_search_unavailable" };
+
+    return {
+      error: "place_search_unavailable",
+    };
   }
 
   const categoryInfo = PLACE_CATEGORIES[category];
@@ -326,10 +409,11 @@ async function fetchNearbyPlaces(location, category, keyword, maxResults) {
   let places = [];
 
   try {
+    // ========================================================
+    // Text search
+    // ========================================================
+
     if (keyword) {
-      // Keyword is free text ("Georgian", "24 hour", "Carrefour", ...) —
-      // includedTypes only covers a fixed enum, so a text query with
-      // location bias is the more reliable way to filter within a category.
       const response = await fetch(
         "https://places.googleapis.com/v1/places:searchText",
         {
@@ -337,7 +421,9 @@ async function fetchNearbyPlaces(location, category, keyword, maxResults) {
           headers,
           body: JSON.stringify({
             textQuery: `${keyword} ${categoryInfo.label}`,
+
             maxResultCount: Math.max(maxResults, 10),
+
             locationBias: {
               circle: {
                 center: location,
@@ -348,9 +434,29 @@ async function fetchNearbyPlaces(location, category, keyword, maxResults) {
         },
       );
 
+      if (!response.ok) {
+        const errorText = await response.text();
+
+        console.error(
+          "findNearbyPlaces: Places searchText failed:",
+          response.status,
+          errorText,
+        );
+
+        return {
+          error: "place_search_failed",
+        };
+      }
+
       const data = await response.json();
+
       places = data.places || [];
-    } else {
+    }
+
+    // ========================================================
+    // Nearby search
+    // ========================================================
+    else {
       const response = await fetch(
         "https://places.googleapis.com/v1/places:searchNearby",
         {
@@ -358,7 +464,9 @@ async function fetchNearbyPlaces(location, category, keyword, maxResults) {
           headers,
           body: JSON.stringify({
             includedTypes: [categoryInfo.includedType],
+
             maxResultCount: Math.max(maxResults, 10),
+
             locationRestriction: {
               circle: {
                 center: location,
@@ -369,7 +477,22 @@ async function fetchNearbyPlaces(location, category, keyword, maxResults) {
         },
       );
 
+      if (!response.ok) {
+        const errorText = await response.text();
+
+        console.error(
+          "findNearbyPlaces: Places searchNearby failed:",
+          response.status,
+          errorText,
+        );
+
+        return {
+          error: "place_search_failed",
+        };
+      }
+
       const data = await response.json();
+
       places = data.places || [];
     }
   } catch (error) {
@@ -377,18 +500,31 @@ async function fetchNearbyPlaces(location, category, keyword, maxResults) {
       "findNearbyPlaces: Places API request failed:",
       error.message,
     );
-    return { error: "place_search_failed" };
+
+    return {
+      error: "place_search_failed",
+    };
   }
+
+  // ==========================================================
+  // Normalize + sort by distance
+  // ==========================================================
 
   const enriched = places
     .filter((p) => p.location)
     .map((p) => ({
       id: p.id,
+
       name: p.displayName?.text || "Unknown",
+
       address: p.formattedAddress,
+
       rating: p.rating,
+
       location: p.location,
+
       category,
+
       distanceMeters: Math.round(haversineMeters(location, p.location)),
     }))
     .sort((a, b) => a.distanceMeters - b.distanceMeters)
@@ -398,26 +534,48 @@ async function fetchNearbyPlaces(location, category, keyword, maxResults) {
     results: enriched.map(
       ({ id, location: _location, category: _category, ...rest }) => rest,
     ),
+
     cacheEntries: enriched,
   };
 }
 
+// ============================================================
+// Gemini custom tool declarations
+//
+// IMPORTANT:
+// Google Search is NOT here.
+//
+// Gemini built-in Google Search is enabled in server.js:
+//
+//   { googleSearch: {} }
+//
+// These are only OUR custom functions.
+// ============================================================
+
 const toolDeclarations = [
   {
     functionDeclarations: [
+      // ======================================================
+      // findNearbyPlaces
+      // ======================================================
+
       {
         name: "findNearbyPlaces",
+
         description:
-          "Finds places of a given category near the user's current location, sorted by distance. " +
-          "Use this for restaurants, hotels, nightlife (bars/clubs), shopping malls, general stores, " +
-          "cafes, gas stations, pharmacies, parks, public transport stops, or ATMs. " +
-          "After telling the user about a result, you can call openPlaceOnMap or showRouteToPlace " +
-          "with that result's exact name if the user wants to see it on the map or get directions.",
+          "Finds real places near the user's current location using Google Places. " +
+          "Use this for nearby restaurants, hotels, nightlife, shopping, stores, cafes, " +
+          "gas stations, pharmacies, parks, public transport stops, or ATMs. " +
+          "Use this when coordinates, distance, Google Place ID, or a map location are needed. " +
+          "After finding a place, its exact name can be used with openPlaceOnMap or showRouteToPlace.",
+
         parameters: {
           type: "OBJECT",
+
           properties: {
             category: {
               type: "STRING",
+
               enum: [
                 "restaurant",
                 "hotel",
@@ -431,82 +589,122 @@ const toolDeclarations = [
                 "transport",
                 "atm",
               ],
+
               description:
-                "The category of place to search for. Pick the closest match to what the user asked for.",
+                "The category of place to search for. Pick the closest match to what the user requested.",
             },
+
             keyword: {
               type: "STRING",
+
               description:
-                'Optional free-text refinement within the category, e.g. "Georgian" or "Italian" ' +
-                'for restaurant, "budget" or "5-star" for hotel, a brand name for store.',
+                'Optional free-text refinement, for example "Georgian", "Italian", "vegetarian", "budget", "5-star", or a specific brand name.',
             },
+
             maxResults: {
               type: "NUMBER",
-              description: "Max number of results to return. Defaults to 3.",
+
+              description:
+                "Maximum number of results to return. Defaults to 3.",
             },
           },
+
           required: ["category"],
         },
       },
+
+      // ======================================================
+      // openPlaceOnMap
+      // ======================================================
+
       {
         name: "openPlaceOnMap",
+
         description:
-          "Focuses the in-app map on a named place so the user can see where it is, without ending the conversation. Call this whenever the user asks to see, open, or be taken to a place mid-conversation — whether it's one of the landmarks you were given, or a place you found for them via findNearbyPlaces.",
+          "Focuses the in-app map on a specific place without ending the conversation. " +
+          "Use this when the user explicitly asks to see or open a place on the map. " +
+          "The place can be a local landmark or a Google Places result previously found by findNearbyPlaces. " +
+          "Use the exact place name returned by the tools. " +
+          "If a place was only discovered through Google Search and is not yet in the nearby-place cache, " +
+          "first use findNearbyPlaces to resolve the place and obtain its coordinates, then call openPlaceOnMap.",
+
         parameters: {
           type: "OBJECT",
+
           properties: {
             placeId: {
               type: "STRING",
+
               description:
-                "The place's exact name, exactly as it appeared either in the landmarks list you " +
-                "were given for this session, or in a findNearbyPlaces result — same language, " +
-                "same spelling. Do not translate or transliterate it into another script or " +
-                "alphabet, even if the conversation itself is happening in a different language.",
+                "The exact place name returned by the landmark catalog or findNearbyPlaces. " +
+                "Do not translate or transliterate it.",
             },
           },
+
           required: ["placeId"],
         },
       },
+
+      // ======================================================
+      // showRouteToPlace
+      // ======================================================
+
       {
         name: "showRouteToPlace",
+
         description:
-          "Ends the voice conversation, switches to the map, and draws a route from the user's " +
-          "current location to the named place — whether it's one of the landmarks you were given, " +
-          "or a place you found for them via findNearbyPlaces. Only call this after you have " +
-          "discussed a specific place and the user has explicitly confirmed they want directions/to " +
-          'see it on the map (e.g. they said "yes", "show me", "sure"). Do not call this ' +
-          "speculatively — always ask first.",
+          "Ends the voice conversation, switches to the map, and draws a route from the user's current location to a specific place. " +
+          "Only call this when the user explicitly asks for directions, a route, or to be taken there. " +
+          "The place can be a local landmark or a Google Places result previously found by findNearbyPlaces. " +
+          "If the place was only discovered through Google Search and is not yet in the nearby-place cache, " +
+          "first use findNearbyPlaces to resolve the place and obtain its coordinates, then call showRouteToPlace. " +
+          "Never call this speculatively.",
+
         parameters: {
           type: "OBJECT",
+
           properties: {
             placeId: {
               type: "STRING",
+
               description:
-                "The place's exact name, exactly as it appeared either in the landmarks list you " +
-                "were given for this session, or in a findNearbyPlaces result — same language, " +
-                "same spelling. Do not translate or transliterate it into another script or " +
-                "alphabet, even if the conversation itself is happening in a different language.",
+                "The exact place name returned by the landmark catalog or findNearbyPlaces. " +
+                "Do not translate or transliterate it.",
             },
           },
+
           required: ["placeId"],
         },
       },
+
+      // ======================================================
+      // getLandmarkDetails
+      // ======================================================
+
       {
         name: "getLandmarkDetails",
+
         description:
-          'Returns the full description/history for a specific landmark by name. Call this when the user asks for details, history, or "tell me about" a place that was only briefly mentioned in the skeleton list.',
+          "Returns the full local description and history for a specific landmark. " +
+          "Use this when the user asks for details, history, background, or 'tell me about' a landmark " +
+          "that appears in the local landmark catalog. " +
+          "If the landmark is not in the local catalog, this function will return found:false. " +
+          "When that happens, immediately use the built-in Google Search tool to find reliable external information. " +
+          "Never tell the user that the place is unavailable merely because it is missing from the local catalog.",
+
         parameters: {
           type: "OBJECT",
+
           properties: {
             title: {
               type: "STRING",
+
               description:
-                "The landmark's exact name as it appears in the landmarks list you were given " +
-                "for this session — same language, same spelling. Do not translate or " +
-                "transliterate it into another script or alphabet, even if the conversation " +
-                "itself is happening in a different language.",
+                "The landmark's exact name as it appears in the landmark list. " +
+                "Use the same language and spelling. Do not translate or transliterate it.",
             },
           },
+
           required: ["title"],
         },
       },
@@ -514,97 +712,101 @@ const toolDeclarations = [
   },
 ];
 
-/**
- * Executes a tool call from Gemini and returns the result to send back as a functionResponse.
- * `session` carries per-connection context (currentLocation, landmarks, nearbyPlacesCache, etc.
- * — wired in via the "context" message from GeminiLiveModal.tsx and via findNearbyPlaces calls
- * themselves; see server.js).
- *
- * findNearbyPlaces resolves data server-side (Google Places API), caches it (with coordinates)
- * in session.nearbyPlacesCache, and returns a lightweight summary to Gemini, for any of the
- * categories in PLACE_CATEGORIES (restaurant, hotel, nightlife, shopping, store, cafe,
- * gas_station, pharmacy, park, transport, atm).
- * openPlaceOnMap and showRouteToPlace resolve the requested name against BOTH session.landmarks
- * and session.nearbyPlacesCache via resolvePlaceReference before acking — the map lives on the
- * client, so beyond validating the match, the proxy also forwards a UI action event to the
- * client (see server.js's toolCall handler, which only does so when found !== false, and
- * forwards the resolved title — plus coordinates, for Google-sourced results the client has no
- * other way to look up).
- * getLandmarkDetails looks up a full description from session.landmarks, which the client
- * sends once at session start alongside the lightweight skeleton context.
- */
+// ============================================================
+// Tool execution
+//
+// Only custom tools are executed here.
+//
+// Google Search is a Gemini-managed built-in tool.
+// There is intentionally NO:
+//
+//   case "webSearch"
+//
+// and NO:
+//
+//   case "googleSearch"
+//
+// Gemini executes Google Search itself.
+// ============================================================
+
 async function executeTool(name, args, session) {
   switch (name) {
+    // ========================================================
+    // findNearbyPlaces
+    // ========================================================
+
     case "findNearbyPlaces": {
       if (!session.currentLocation) {
-        // GeminiLiveModal.tsx sends currentLocation as part of its "context"
-        // messages (initial fix + periodic GPS updates). If none has arrived
-        // yet — permission not granted, or fix still pending — tell Gemini
-        // rather than silently returning fabricated results.
-        return { error: "location_unavailable" };
+        return {
+          error: "location_unavailable",
+        };
       }
 
-      const maxResults = args.maxResults || DEFAULT_MAX_RESULTS;
+      const requestedMaxResults = Number(args?.maxResults);
+
+      const maxResults =
+        Number.isFinite(requestedMaxResults) && requestedMaxResults > 0
+          ? Math.min(Math.floor(requestedMaxResults), 10)
+          : DEFAULT_MAX_RESULTS;
 
       const { results, cacheEntries, error } = await fetchNearbyPlaces(
         session.currentLocation,
-        args.category,
-        args.keyword,
+        args?.category,
+        args?.keyword,
         maxResults,
       );
 
       if (error) {
-        return { error };
+        return {
+          error,
+        };
       }
 
       cacheNearbyPlaces(session, cacheEntries);
 
-      return { results };
+      return {
+        results,
+      };
     }
+
+    // ========================================================
+    // openPlaceOnMap / showRouteToPlace
+    // ========================================================
+
     case "openPlaceOnMap":
     case "showRouteToPlace": {
-      // ⬅️ FIX: both actions now resolve through resolvePlaceReference,
-      // which checks session.landmarks AND session.nearbyPlacesCache —
-      // previously only openPlaceOnMap/showRouteToPlace against curated
-      // landmarks worked at all; a findNearbyPlaces result (a restaurant,
-      // cafe, etc.) had no coordinates stored anywhere and could never be
-      // marked on the map, and any mismatch (translated/transliterated
-      // name) used to still return a blind ok:true.
-      const resolved = resolvePlaceReference(session, args.placeId);
+      const resolved = resolvePlaceReference(session, args?.placeId);
 
       if (!resolved.found) {
-        console.warn(
-          `${name}: no match for "${args.placeId}" — available landmarks: ` +
-            (session.landmarks || []).map((l) => l.title).join(", "),
-        );
+        console.warn(`${name}: no match for "${args?.placeId}"`);
 
         return {
           found: false,
+
           message:
-            `"${args.placeId}" ვერ მოიძებნა. ` +
-            `ხელმისაწვდომი ღირსშესანიშნაობებია: ` +
-            (session.landmarks || []).map((l) => l.title).join(", "),
+            "The requested place could not be resolved from the current local landmark data or previously discovered Google Places. " +
+            "If the place came from web search, use findNearbyPlaces first to resolve its exact Google Place and coordinates.",
         };
       }
 
-      return { ok: true, ...resolved };
+      return {
+        ok: true,
+        ...resolved,
+      };
     }
+
+    // ========================================================
+    // getLandmarkDetails
+    // ========================================================
+
     case "getLandmarkDetails": {
-      const landmark = findLandmarkByTitle(session.landmarks, args.title);
+      const landmark = findLandmarkByTitle(session.landmarks, args?.title);
 
       if (!landmark) {
-        // Gemini-ს ვეუბნებით კონკრეტულად — დაბრუნდეს landmark სიაში
-        // და სხვა მსგავსი სახელი სცადოს
-        console.warn(
-          `getLandmarkDetails: no match for "${args.title}" — available: ` +
-            (session.landmarks || []).map((l) => l.title).join(", "),
-        );
+        console.warn(`getLandmarkDetails: no local match for "${args?.title}"`);
+
         return {
           found: false,
-          message:
-            `"${args.title}" ვერ მოიძებნა. ` +
-            `ხელმისაწვდომი ღირსშესანიშნაობებია: ` +
-            (session.landmarks || []).map((l) => l.title).join(", "),
         };
       }
 
@@ -615,9 +817,24 @@ async function executeTool(name, args, session) {
         description: landmark.description,
       };
     }
-    default:
-      return { error: `Unknown tool: ${name}` };
+
+    // ========================================================
+    // Unknown tool
+    // ========================================================
+
+    default: {
+      return {
+        error: `Unknown tool: ${name}`,
+      };
+    }
   }
 }
 
-module.exports = { toolDeclarations, executeTool };
+// ============================================================
+// Exports
+// ============================================================
+
+module.exports = {
+  toolDeclarations,
+  executeTool,
+};
