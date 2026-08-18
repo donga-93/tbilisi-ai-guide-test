@@ -250,8 +250,7 @@ wss.on("connection", (clientSocket) => {
     if (msg.type === "interrupt") {
       console.log("Client requested interruption");
 
-      // Gemini Live handles interruption
-      // through realtime input.
+      // Gemini Live handles interruption through realtime input.
       return;
     }
 
@@ -473,10 +472,34 @@ function connectToGeminiLive(clientSocket, session) {
 
     const systemInstructionText =
       languageInstruction +
-      "You are a concise Tbilisi tour guide in a real-time voice conversation. " +
+      // ------------------------------------------------------
+      // Core voice behavior
+      // ------------------------------------------------------
+
+      "You are a calm, clear and natural Tbilisi tour guide in a real-time voice conversation. " +
       "Wait for the user to speak first. Do not start speaking automatically. " +
       "Once the user speaks, respond naturally and conversationally. " +
+      // ------------------------------------------------------
+      // Speech speed and articulation
+      // ------------------------------------------------------
+
+      "Speak at a moderate, relaxed pace. " +
+      "Do not speak too quickly. " +
+      "Prioritize clear articulation over speed. " +
+      "Pronounce every word completely and clearly. " +
+      "Never swallow, rush through, merge, or cut off words. " +
+      "Do not compress several words into a single rushed phrase. " +
+      "Use natural short pauses between sentences and important phrases. " +
+      "Finish each sentence clearly before moving to the next sentence. " +
+      "When speaking Georgian, pronounce Georgian words clearly and naturally. " +
+      "Do not sacrifice pronunciation or intelligibility for response speed. " +
+      // ------------------------------------------------------
+      // Response length
+      // ------------------------------------------------------
+
       "Keep answers concise and suitable for real-time voice conversation. " +
+      "Prefer short, complete sentences rather than long continuous speech. " +
+      "Usually answer in one to three short sentences unless the user explicitly asks for more detail. " +
       "Avoid long monologues unless the user explicitly asks for detailed information. " +
       // ------------------------------------------------------
       // Local catalog
@@ -578,6 +601,9 @@ function connectToGeminiLive(clientSocket, session) {
 
         // ------------------------------------------------------
         // Voice Activity Detection
+        //
+        // Increased silence duration prevents Gemini from
+        // ending the user's turn too aggressively.
         // ------------------------------------------------------
 
         realtimeInputConfig: {
@@ -588,9 +614,12 @@ function connectToGeminiLive(clientSocket, session) {
 
             endOfSpeechSensitivity: "END_SENSITIVITY_LOW",
 
-            prefixPaddingMs: 300,
+            prefixPaddingMs: 400,
 
-            silenceDurationMs: 800,
+            // IMPORTANT:
+            // 800ms was too aggressive and could cut turns early.
+            // 1400ms gives the user more time to finish words/sentences.
+            silenceDurationMs: 1400,
           },
         },
 
@@ -627,8 +656,6 @@ function connectToGeminiLive(clientSocket, session) {
         // ------------------------------------------------------
         // Tools
         //
-        // IMPORTANT:
-        //
         // googleSearch is Gemini's BUILT-IN Google Search.
         //
         // toolDeclarations contains only our custom tools.
@@ -649,6 +676,10 @@ function connectToGeminiLive(clientSocket, session) {
 
       console.log(
         "Gemini setup sent with built-in Google Search + custom tools",
+      );
+
+      console.log(
+        "Voice tuning: moderate pace + clear articulation + 1400ms turn silence",
       );
     } catch (error) {
       console.error("Failed to send Gemini setup:", error.message);
@@ -742,7 +773,6 @@ function connectToGeminiLive(clientSocket, session) {
     // ======================================================
     // Custom tool calls
     //
-    // NOTE:
     // Built-in googleSearch calls are handled internally
     // by Gemini and do NOT arrive here as our custom
     // function calls.
@@ -1045,6 +1075,10 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log("Google Search: BUILT-IN GEMINI TOOL ENABLED");
 
   console.log("Custom tools: ENABLED");
+
+  console.log("Voice pacing: MODERATE / CLEAR");
+
+  console.log("User turn silence: 1400ms");
 
   console.log("Test authentication mode: ENABLED");
 });
