@@ -104,6 +104,9 @@ wss.on("connection", (clientSocket) => {
 
     // Prevent processing stale Gemini sockets
     connectionGeneration: 0,
+    // Timing diagnostics
+    lastAudioReceivedAt: null,
+    firstResponseAt: null,
   };
 
   // ==========================================================
@@ -224,6 +227,7 @@ wss.on("connection", (clientSocket) => {
 
         return;
       }
+      session.lastAudioReceivedAt = Date.now();
 
       try {
         session.geminiSocket.send(
@@ -772,6 +776,24 @@ function connectToGeminiLive(clientSocket, session) {
     const parts = serverContent.modelTurn?.parts || [];
 
     // ======================================================
+    // Timing diagnostics — first chunk of this turn
+    // ======================================================
+
+    if (parts.length > 0 && !session.firstResponseAt) {
+      session.firstResponseAt = Date.now();
+
+      const gapMs = session.lastAudioReceivedAt
+        ? session.firstResponseAt - session.lastAudioReceivedAt
+        : null;
+
+      console.log(
+        `[TIMING] First response chunk. Gap since last user audio: ${
+          gapMs !== null ? gapMs + "ms" : "unknown"
+        }`,
+      );
+    }
+
+    // ======================================================
     // Model output
     // ======================================================
 
@@ -804,6 +826,17 @@ function connectToGeminiLive(clientSocket, session) {
     // ======================================================
 
     if (serverContent.turnComplete) {
+      if (session.firstResponseAt && session.lastAudioReceivedAt) {
+        console.log(
+          `[TIMING] Turn complete. Total latency: ${
+            session.firstResponseAt - session.lastAudioReceivedAt
+          }ms`,
+        );
+      }
+
+      session.firstResponseAt = null;
+      session.lastAudioReceivedAt = null;
+
       sendToClient(clientSocket, {
         type: "turnEnd",
         interrupted: false,
@@ -838,7 +871,7 @@ function connectToGeminiLive(clientSocket, session) {
     const reasonText = reason ? reason.toString() : "";
 
     console.log(
-      `Gemini Live socket closed: ${code}, reason: ${
+      `[TIMING] Gemini socket closed at ${new Date().toISOString()}: ${code}, reason: ${
         reasonText || "No reason provided"
       }`,
     );
