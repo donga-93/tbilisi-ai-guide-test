@@ -212,6 +212,15 @@ wss.on("connection", (clientSocket) => {
       !session.geminiSocket ||
       session.geminiSocket.readyState !== WebSocket.OPEN
     ) {
+      // Brief, transient gap (e.g. server-side reconnect in progress
+      // after a Gemini socket hiccup): drop audio silently instead of
+      // erroring the whole client session. A fresh gemini_ready will
+      // arrive shortly once reconnect completes; forcing a full
+      // client-side reconnect for a 1-second gap is disproportionate.
+      if (session.reconnecting) {
+        return;
+      }
+
       sendError(clientSocket, "Gemini session not ready yet");
 
       return;
@@ -914,7 +923,7 @@ function connectToGeminiLive(clientSocket, session) {
         } else {
           session.reconnecting = false;
         }
-      }, 1000);
+      }, 300);
 
       return;
     }
