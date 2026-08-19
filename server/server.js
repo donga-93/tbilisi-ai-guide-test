@@ -578,6 +578,9 @@ function connectToGeminiLive(clientSocket, session) {
 
         generationConfig: {
           responseModalities: ["AUDIO"],
+          thinkingConfig: {
+            thinkingBudget: 0,
+          },
         },
 
         // ------------------------------------------------------
