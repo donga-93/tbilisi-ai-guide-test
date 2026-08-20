@@ -100,6 +100,35 @@ function findLandmarkByTitle(landmarks, rawQuery) {
   }
 
   // ----------------------------------------------------------
+  // Alternate-language exact match
+  //
+  // Gemini ხშირად იძახებს ცნობილი ადგილების ინგლისურ (ან სხვა
+  // ენის) სახელს, მიუხედავად "don't translate" ინსტრუქციისა.
+  // alternateTitles შეიცავს landmark-ის ყველა დანარჩენი ენის
+  // title-ს, სწორედ ამ შემთხვევისთვის.
+  // ----------------------------------------------------------
+
+  const exactAlt = landmarks.find((l) => {
+    if (!l.alternateTitles || l.alternateTitles.length === 0) {
+      return false;
+    }
+
+    return l.alternateTitles.some((alt) => {
+      const altLower = (alt || "").toLowerCase();
+
+      return altLower.includes(query) || query.includes(altLower);
+    });
+  });
+
+  if (exactAlt) {
+    console.log(
+      `findLandmarkByTitle: "${rawQuery}" → alternate-title exact match "${exactAlt.title}"`,
+    );
+
+    return exactAlt;
+  }
+
+  // ----------------------------------------------------------
   // Fuzzy match
   // ----------------------------------------------------------
 
@@ -107,7 +136,17 @@ function findLandmarkByTitle(landmarks, rawQuery) {
   let bestScore = 0;
 
   for (const l of landmarks) {
-    const score = scoreTitleMatch(query, l.title || "");
+    let score = scoreTitleMatch(query, l.title || "");
+
+    if (l.alternateTitles && l.alternateTitles.length > 0) {
+      for (const alt of l.alternateTitles) {
+        const altScore = scoreTitleMatch(query, alt || "");
+
+        if (altScore > score) {
+          score = altScore;
+        }
+      }
+    }
 
     if (score > bestScore) {
       bestScore = score;
