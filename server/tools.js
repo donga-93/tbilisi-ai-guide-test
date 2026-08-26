@@ -313,11 +313,11 @@ function resolvePlaceReference(session, rawQuery) {
 // - coordinates
 // - distance
 // - Google Place ID
+// - open/closed status (isOpen)
 //
 // Google Search:
 // - general web information
 // - current facts
-// - opening hours
 // - prices
 // - reviews
 // - events
@@ -328,6 +328,11 @@ function resolvePlaceReference(session, rawQuery) {
 const GOOGLE_PLACES_API_KEY = process.env.GOOGLE_PLACES_API_KEY;
 
 const DEFAULT_SEARCH_RADIUS_METERS = 1500;
+
+// ⬅️ ახალი: თუ ახლომახლო ყველა ცნობილი შედეგი დახურულია, ამ
+// უფრო ფართო რადიუსში ვცდილობთ ღია ალტერნატივის პოვნას.
+const WIDE_SEARCH_RADIUS_METERS = 5000;
+
 const DEFAULT_MAX_RESULTS = 3;
 
 const PLACE_CATEGORIES = {
@@ -412,13 +417,153 @@ function haversineMeters(a, b) {
 
 // ============================================================
 // Google Places fields
+//
+// ⬅️ დაემატა: regularOpeningHours.openNow, რომ findNearbyPlaces-მა
+// შეძლოს "ღიაა თუ არა ახლა" სტატუსის დაბრუნება თითოეული ადგილისთვის.
 // ============================================================
 
 const PLACES_FIELD_MASK =
-  "places.id,places.displayName,places.location,places.formattedAddress,places.rating";
+  "places.id,places.displayName,places.location,places.formattedAddress," +
+  "places.rating,places.regularOpeningHours.openNow";
 
 // ============================================================
-// Google Places request
+// Raw Google Places request
+//
+// ერთი დაბალდონიანი ფუნქცია, რომელსაც ვიძახებთ ორჯერ:
+// ჯერ ჩვეულებრივი radius-ით, საჭიროების შემთხვევაში კიდევ
+// ერთხელ WIDE_SEARCH_RADIUS_METERS-ით (ღია ალტერნატივის საძებნად).
+// ============================================================
+
+async function searchPlacesRaw(location, categoryInfo, keyword, radius, limit) {
+  const headers = {
+    "Content-Type": "application/json",
+    "X-Goog-Api-Key": GOOGLE_PLACES_API_KEY,
+    "X-Goog-FieldMask": PLACES_FIELD_MASK,
+  };
+
+  // ==========================================================
+  // Text search
+  // ==========================================================
+
+  if (keyword) {
+    const response = await fetch(
+      "https://places.googleapis.com/v1/places:searchText",
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          textQuery: `${keyword} ${categoryInfo.label}`,
+
+          maxResultCount: Math.max(limit, 10),
+
+          locationBias: {
+            circle: {
+              center: location,
+              radius,
+            },
+          },
+        }),
+      },
+    );
+
+    if (!response.ok) {
+      const errorText = await response.text();
+
+      console.error(
+        "searchPlacesRaw: Places searchText failed:",
+        response.status,
+        errorText,
+      );
+
+      return null;
+    }
+
+    const data = await response.json();
+
+    return data.places || [];
+  }
+
+  // ==========================================================
+  // Nearby search
+  // ==========================================================
+
+  const response = await fetch(
+    "https://places.googleapis.com/v1/places:searchNearby",
+    {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        includedTypes: [categoryInfo.includedType],
+
+        maxResultCount: Math.max(limit, 10),
+
+        locationRestriction: {
+          circle: {
+            center: location,
+            radius,
+          },
+        },
+      }),
+    },
+  );
+
+  if (!response.ok) {
+    const errorText = await response.text();
+
+    console.error(
+      "searchPlacesRaw: Places searchNearby failed:",
+      response.status,
+      errorText,
+    );
+
+    return null;
+  }
+
+  const data = await response.json();
+
+  return data.places || [];
+}
+
+// ============================================================
+// Normalize + sort by distance, keep openNow status
+// ============================================================
+
+function enrichAndSort(places, location, category) {
+  return places
+    .filter((p) => p.location)
+    .map((p) => ({
+      id: p.id,
+
+      name: p.displayName?.text || "Unknown",
+
+      address: p.formattedAddress,
+
+      rating: p.rating,
+
+      location: p.location,
+
+      category,
+
+      // true = ღიაა ახლა, false = დახურულია, null = საათები უცნობია
+      isOpen:
+        p.regularOpeningHours &&
+        typeof p.regularOpeningHours.openNow === "boolean"
+          ? p.regularOpeningHours.openNow
+          : null,
+
+      distanceMeters: Math.round(haversineMeters(location, p.location)),
+    }))
+    .sort((a, b) => a.distanceMeters - b.distanceMeters);
+}
+
+// ============================================================
+// fetchNearbyPlaces — ორსაფეხურიანი ძებნა
+//
+// 1. ჩვეულებრივი radius-ით ვეძებთ უახლოეს ადგილებს (maxResults)
+// 2. თუ ამ ნაპოვნი ადგილებიდან არცერთი არ არის ღია ან უცნობი
+//    (ანუ ყველა ცნობილად დახურულია), ვცდილობთ ვიპოვოთ უფრო
+//    შორეული, მაგრამ ამჟამად ღია ალტერნატივა WIDE_SEARCH_RADIUS_METERS
+//    რადიუსში.
 // ============================================================
 
 async function fetchNearbyPlaces(location, category, keyword, maxResults) {
@@ -439,101 +584,16 @@ async function fetchNearbyPlaces(location, category, keyword, maxResults) {
     };
   }
 
-  const headers = {
-    "Content-Type": "application/json",
-    "X-Goog-Api-Key": GOOGLE_PLACES_API_KEY,
-    "X-Goog-FieldMask": PLACES_FIELD_MASK,
-  };
-
-  let places = [];
+  let rawPlaces;
 
   try {
-    // ========================================================
-    // Text search
-    // ========================================================
-
-    if (keyword) {
-      const response = await fetch(
-        "https://places.googleapis.com/v1/places:searchText",
-        {
-          method: "POST",
-          headers,
-          body: JSON.stringify({
-            textQuery: `${keyword} ${categoryInfo.label}`,
-
-            maxResultCount: Math.max(maxResults, 10),
-
-            locationBias: {
-              circle: {
-                center: location,
-                radius: DEFAULT_SEARCH_RADIUS_METERS,
-              },
-            },
-          }),
-        },
-      );
-
-      if (!response.ok) {
-        const errorText = await response.text();
-
-        console.error(
-          "findNearbyPlaces: Places searchText failed:",
-          response.status,
-          errorText,
-        );
-
-        return {
-          error: "place_search_failed",
-        };
-      }
-
-      const data = await response.json();
-
-      places = data.places || [];
-    }
-
-    // ========================================================
-    // Nearby search
-    // ========================================================
-    else {
-      const response = await fetch(
-        "https://places.googleapis.com/v1/places:searchNearby",
-        {
-          method: "POST",
-          headers,
-          body: JSON.stringify({
-            includedTypes: [categoryInfo.includedType],
-
-            maxResultCount: Math.max(maxResults, 10),
-
-            locationRestriction: {
-              circle: {
-                center: location,
-                radius: DEFAULT_SEARCH_RADIUS_METERS,
-              },
-            },
-          }),
-        },
-      );
-
-      if (!response.ok) {
-        const errorText = await response.text();
-
-        console.error(
-          "findNearbyPlaces: Places searchNearby failed:",
-          response.status,
-          errorText,
-        );
-
-        return {
-          error: "place_search_failed",
-        };
-      }
-
-      const data = await response.json();
-
-      places = data.places || [];
-    }
+    rawPlaces = await searchPlacesRaw(
+      location,
+      categoryInfo,
+      keyword,
+      DEFAULT_SEARCH_RADIUS_METERS,
+      maxResults,
+    );
   } catch (error) {
     console.error(
       "findNearbyPlaces: Places API request failed:",
@@ -545,36 +605,211 @@ async function fetchNearbyPlaces(location, category, keyword, maxResults) {
     };
   }
 
+  if (rawPlaces === null) {
+    return {
+      error: "place_search_failed",
+    };
+  }
+
+  const enriched = enrichAndSort(rawPlaces, location, category);
+  const nearest = enriched.slice(0, maxResults);
+
   // ==========================================================
-  // Normalize + sort by distance
+  // ღია ალტერნატივის ძებნა, თუ ახლომახლო ყველა ცნობილად დახურულია
   // ==========================================================
 
-  const enriched = places
-    .filter((p) => p.location)
-    .map((p) => ({
-      id: p.id,
+  const anyOpenOrUnknown = nearest.some((p) => p.isOpen !== false);
 
-      name: p.displayName?.text || "Unknown",
+  let fartherOpenAlternative = null;
 
-      address: p.formattedAddress,
+  if (nearest.length > 0 && !anyOpenOrUnknown) {
+    try {
+      const widerRaw = await searchPlacesRaw(
+        location,
+        categoryInfo,
+        keyword,
+        WIDE_SEARCH_RADIUS_METERS,
+        20,
+      );
 
-      rating: p.rating,
+      if (widerRaw) {
+        const widerEnriched = enrichAndSort(widerRaw, location, category);
 
-      location: p.location,
+        fartherOpenAlternative =
+          widerEnriched.find((p) => p.isOpen === true) || null;
+      }
+    } catch (error) {
+      console.error(
+        "findNearbyPlaces: wide search for open alternative failed:",
+        error.message,
+      );
+    }
+  }
 
-      category,
+  // ==========================================================
+  // Cache entries — nearest results + the farther alternative
+  // (if it isn't already among them)
+  // ==========================================================
 
-      distanceMeters: Math.round(haversineMeters(location, p.location)),
-    }))
-    .sort((a, b) => a.distanceMeters - b.distanceMeters)
-    .slice(0, maxResults);
+  const cacheEntries = [...nearest];
+
+  if (
+    fartherOpenAlternative &&
+    !cacheEntries.some((p) => p.id === fartherOpenAlternative.id)
+  ) {
+    cacheEntries.push(fartherOpenAlternative);
+  }
+
+  const stripInternal = ({
+    id,
+    location: _location,
+    category: _category,
+    ...rest
+  }) => rest;
 
   return {
-    results: enriched.map(
-      ({ id, location: _location, category: _category, ...rest }) => rest,
-    ),
+    results: nearest.map(stripInternal),
 
-    cacheEntries: enriched,
+    fartherOpenAlternative: fartherOpenAlternative
+      ? stripInternal(fartherOpenAlternative)
+      : null,
+
+    cacheEntries,
+  };
+}
+
+// ============================================================
+// "სად ვარ მე?" — უახლოესი POI + მისამართი
+//
+// ორი დამოუკიდებელი წყარო:
+// 1. Places API searchNearby ვიწრო რადიუსით — ზუსტად რომელ
+//    ობიექტთან ახლოს დგას მომხმარებელი (რესტორანი, მაღაზია,
+//    ღირსშესანიშნაობა და ა.შ.)
+// 2. Geocoding API (reverse geocoding) — მისამართი/უბანი
+//
+// თუ ერთ-ერთი ვერ მუშაობს, მეორე მაინც აბრუნებს შედეგს.
+// ============================================================
+
+const CURRENT_LOCATION_POI_RADIUS_METERS = 60;
+
+async function fetchCurrentLocationContext(location) {
+  if (!GOOGLE_PLACES_API_KEY) {
+    return {
+      error: "location_lookup_unavailable",
+    };
+  }
+
+  let nearestPlace = null;
+  let address = null;
+
+  // ==========================================================
+  // უახლოესი POI
+  // ==========================================================
+
+  try {
+    const response = await fetch(
+      "https://places.googleapis.com/v1/places:searchNearby",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Goog-Api-Key": GOOGLE_PLACES_API_KEY,
+          "X-Goog-FieldMask":
+            "places.id,places.displayName,places.formattedAddress," +
+            "places.types,places.primaryType,places.location",
+        },
+        body: JSON.stringify({
+          maxResultCount: 5,
+
+          locationRestriction: {
+            circle: {
+              center: location,
+              radius: CURRENT_LOCATION_POI_RADIUS_METERS,
+            },
+          },
+        }),
+      },
+    );
+
+    if (response.ok) {
+      const data = await response.json();
+      const places = data.places || [];
+
+      let closest = null;
+      let closestDistance = Infinity;
+
+      for (const p of places) {
+        if (!p.location) continue;
+
+        const distance = haversineMeters(location, p.location);
+
+        if (distance < closestDistance) {
+          closestDistance = distance;
+          closest = p;
+        }
+      }
+
+      if (closest) {
+        nearestPlace = {
+          name: closest.displayName?.text || null,
+
+          type:
+            closest.primaryType || (closest.types && closest.types[0]) || null,
+
+          address: closest.formattedAddress || null,
+
+          distanceMeters: Math.round(closestDistance),
+        };
+      }
+    } else {
+      console.error(
+        "fetchCurrentLocationContext: nearby POI lookup failed:",
+        response.status,
+        await response.text(),
+      );
+    }
+  } catch (error) {
+    console.error(
+      "fetchCurrentLocationContext: nearby POI lookup error:",
+      error.message,
+    );
+  }
+
+  // ==========================================================
+  // Reverse geocoding — მისამართი/უბანი
+  //
+  // ⚠️ საჭიროებს Geocoding API-ს ჩართვას იმავე Google Cloud
+  // პროექტში (და, თუ key შეზღუდულია, key-ის API restrictions-ში).
+  // ==========================================================
+
+  try {
+    const geoUrl =
+      `https://maps.googleapis.com/maps/api/geocode/json` +
+      `?latlng=${location.latitude},${location.longitude}` +
+      `&language=ka&key=${GOOGLE_PLACES_API_KEY}`;
+
+    const response = await fetch(geoUrl);
+    const data = await response.json();
+
+    if (data.status === "OK" && data.results && data.results.length > 0) {
+      address = data.results[0].formatted_address || null;
+    } else if (data.status && data.status !== "OK") {
+      console.error(
+        "fetchCurrentLocationContext: reverse geocoding status:",
+        data.status,
+        data.error_message || "",
+      );
+    }
+  } catch (error) {
+    console.error(
+      "fetchCurrentLocationContext: reverse geocoding error:",
+      error.message,
+    );
+  }
+
+  return {
+    nearestPlace,
+    address,
   };
 }
 
@@ -605,7 +840,11 @@ const toolDeclarations = [
           "Finds real places near the user's current location using Google Places. " +
           "Use this for nearby restaurants, hotels, nightlife, shopping, stores, cafes, " +
           "gas stations, pharmacies, parks, public transport stops, or ATMs. " +
-          "Use this when coordinates, distance, Google Place ID, or a map location are needed. " +
+          "Use this when coordinates, distance, Google Place ID, a map location, or the " +
+          "place's current open/closed status are needed. " +
+          "Each result includes an isOpen field (true/false/null). If the closest results are " +
+          "all closed, the response may include a fartherOpenAlternative — a slightly farther " +
+          "place of the same category that is currently open. " +
           "After finding a place, its exact name can be used with openPlaceOnMap or showRouteToPlace.",
 
         parameters: {
@@ -649,6 +888,27 @@ const toolDeclarations = [
           },
 
           required: ["category"],
+        },
+      },
+
+      // ======================================================
+      // getCurrentLocationInfo
+      // ======================================================
+
+      {
+        name: "getCurrentLocationInfo",
+
+        description:
+          "Returns information about exactly where the user currently is: the nearest point " +
+          "of interest (for example a specific restaurant, shop, landmark, residential building, " +
+          "or other business) and a human-readable address or neighborhood. " +
+          "Use this when the user asks something like 'where am I', 'what is this place', " +
+          "or 'what's around me right now'. Takes no parameters — it always uses the user's " +
+          "current known location.",
+
+        parameters: {
+          type: "OBJECT",
+          properties: {},
         },
       },
 
@@ -788,12 +1048,13 @@ async function executeTool(name, args, session) {
           ? Math.min(Math.floor(requestedMaxResults), 10)
           : DEFAULT_MAX_RESULTS;
 
-      const { results, cacheEntries, error } = await fetchNearbyPlaces(
-        session.currentLocation,
-        args?.category,
-        args?.keyword,
-        maxResults,
-      );
+      const { results, fartherOpenAlternative, cacheEntries, error } =
+        await fetchNearbyPlaces(
+          session.currentLocation,
+          args?.category,
+          args?.keyword,
+          maxResults,
+        );
 
       if (error) {
         return {
@@ -805,7 +1066,30 @@ async function executeTool(name, args, session) {
 
       return {
         results,
+        fartherOpenAlternative,
       };
+    }
+
+    // ========================================================
+    // getCurrentLocationInfo
+    // ========================================================
+
+    case "getCurrentLocationInfo": {
+      if (!session.currentLocation) {
+        return {
+          error: "location_unavailable",
+        };
+      }
+
+      const context = await fetchCurrentLocationContext(
+        session.currentLocation,
+      );
+
+      if (context.error) {
+        return context;
+      }
+
+      return context;
     }
 
     // ========================================================

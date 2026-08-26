@@ -526,6 +526,43 @@ function connectToGeminiLive(clientSocket, session) {
       "Use findNearbyPlaces when the user asks for nearby places or recommendations " +
       "based on their current location. " +
       // ------------------------------------------------------
+      // Open now / closed handling
+      //
+      // NEW: findNearbyPlaces results now include an isOpen field
+      // per place (true / false / null), and the tool response may
+      // include a fartherOpenAlternative when the closest results
+      // are all currently closed. This block tells Gemini how to
+      // use that data in conversation.
+      // ------------------------------------------------------
+
+      "Every result from findNearbyPlaces includes an isOpen field: " +
+      "true means the place is open right now, false means it is currently closed, " +
+      "and null means opening hours are unknown. " +
+      "Always mention whether a place is currently open when recommending it, " +
+      "especially if the user asked about visiting now or asked whether it's open. " +
+      "If the closest result is closed (isOpen: false), tell the user clearly that it is " +
+      "currently closed — do not recommend it as if it were open. " +
+      "If the tool result includes a fartherOpenAlternative, offer it to the user as a " +
+      "slightly farther but currently open option instead of the closed one. " +
+      "If isOpen is null for a place, you may mention that its current opening status " +
+      "is unknown rather than assuming it is open. " +
+      // ------------------------------------------------------
+      // Current location
+      //
+      // NEW: getCurrentLocationInfo answers "where am I" questions
+      // using the nearest point of interest plus a reverse-geocoded
+      // address, so Gemini should call it instead of guessing.
+      // ------------------------------------------------------
+
+      "Use getCurrentLocationInfo when the user asks where they currently are, " +
+      "or what place, business, or landmark they are standing at or near right now " +
+      "(for example 'სად ვარ მე?', 'რა ადგილას ვარ?', 'რა არის ეს ადგილი?', 'what is this place'). " +
+      "Describe the result naturally and conversationally: mention what kind of place it is " +
+      "(for example a restaurant, shop, landmark, residential building, or another type of place) " +
+      "if a nearestPlace is returned, its name if known, and the general address or neighborhood. " +
+      "If nearestPlace is null, rely on the address alone and describe the general area instead. " +
+      "Never guess the user's location without calling getCurrentLocationInfo first. " +
+      // ------------------------------------------------------
       // Exact names
       // ------------------------------------------------------
 
@@ -990,6 +1027,14 @@ async function handleGeminiToolCalls(
 
     if (call.name === "findNearbyPlaces" && result && !result.error) {
       console.log("Nearby places search completed");
+    }
+
+    // ========================================================
+    // Current location
+    // ========================================================
+
+    if (call.name === "getCurrentLocationInfo" && result && !result.error) {
+      console.log("Current location lookup completed");
     }
 
     // ========================================================
