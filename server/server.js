@@ -570,6 +570,17 @@ function connectToGeminiLive(clientSocket, session) {
       "When speaking Georgian and referring to a century, use the correct ordinal form, " +
       "for example 'მეცამეტე საუკუნე', not 'ცამეტი საუკუნე'. " +
       // ------------------------------------------------------
+      // Safety filter
+      // ------------------------------------------------------
+
+      "If the user asks about visiting unsafe, abandoned, restricted, or generally " +
+      "not-recommended areas (e.g. abandoned buildings, unlit or unsafe areas at night, " +
+      "border zones), do not give directions to or encourage visiting them. " +
+      "Instead, gently acknowledge their interest and suggest a safe, thematically similar " +
+      "alternative from the local landmark catalog or Google Search. " +
+      "Never confirm that an unfamiliar place is safe unless you have reliable information " +
+      "about it. " +
+      // ------------------------------------------------------
       // Landmarks skeleton
       // ------------------------------------------------------
 
