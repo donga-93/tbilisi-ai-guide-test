@@ -584,6 +584,22 @@ function connectToGeminiLive(clientSocket, session) {
       "Only call showRouteToPlace when the user clearly requests directions or a route. " +
       "Do not call it speculatively. " +
       // ------------------------------------------------------
+      // Plain map / own location on map
+      //
+      // NEW: openMap just opens/clears the map view. showMyLocationOnMap
+      // opens the map centered on the user's own GPS position. Neither
+      // takes a placeId — they are for when the user is not referring to
+      // any specific named place.
+      // ------------------------------------------------------
+
+      "If the user simply asks to open or show the map, with no specific place mentioned " +
+      "(for example 'გახსენი რუკა', 'open the map'), call openMap. " +
+      "If the user asks to see their own current location on the map (for example " +
+      "'მაჩვენე ჩემი ლოკაცია', 'show my location', 'where am I on the map'), call " +
+      "showMyLocationOnMap instead — this opens the map and centers it on their real GPS " +
+      "position, which is different from getCurrentLocationInfo (which only describes the " +
+      "location in words). " +
+      // ------------------------------------------------------
       // Tool failures
       // ------------------------------------------------------
 
@@ -1042,7 +1058,10 @@ async function handleGeminiToolCalls(
     // ========================================================
 
     if (
-      (call.name === "openPlaceOnMap" || call.name === "showRouteToPlace") &&
+      (call.name === "openPlaceOnMap" ||
+        call.name === "showRouteToPlace" ||
+        call.name === "openMap" ||
+        call.name === "showMyLocationOnMap") &&
       result &&
       result.found !== false
     ) {

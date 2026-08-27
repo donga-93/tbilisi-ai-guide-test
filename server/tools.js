@@ -913,6 +913,46 @@ const toolDeclarations = [
       },
 
       // ======================================================
+      // openMap
+      // ======================================================
+
+      {
+        name: "openMap",
+
+        description:
+          "Opens a plain map view, closing any place details, search results, or route " +
+          "currently shown. Use this when the user simply asks to open or show the map " +
+          "(for example 'გახსენი რუკა', 'open the map') without asking for a specific " +
+          "place or their own location. Do not use this when the user wants to see their " +
+          "own current location — use showMyLocationOnMap for that instead.",
+
+        parameters: {
+          type: "OBJECT",
+          properties: {},
+        },
+      },
+
+      // ======================================================
+      // showMyLocationOnMap
+      // ======================================================
+
+      {
+        name: "showMyLocationOnMap",
+
+        description:
+          "Opens the map and centers it on the user's real-time GPS location, showing " +
+          "exactly where they currently are. Use this when the user asks to see their own " +
+          "location on the map (for example 'მაჩვენე ჩემი ლოკაცია', 'show my location', " +
+          "'where am I on the map'). This is distinct from getCurrentLocationInfo, which " +
+          "describes the location in words instead of showing it on the map.",
+
+        parameters: {
+          type: "OBJECT",
+          properties: {},
+        },
+      },
+
+      // ======================================================
       // openPlaceOnMap
       // ======================================================
 
@@ -1090,6 +1130,31 @@ async function executeTool(name, args, session) {
       }
 
       return context;
+    }
+
+    // ========================================================
+    // openMap
+    // ========================================================
+
+    case "openMap": {
+      return {
+        ok: true,
+      };
+    }
+
+    // ========================================================
+    // showMyLocationOnMap
+    // ========================================================
+
+    case "showMyLocationOnMap": {
+      // session.currentLocation-ს ვაბრუნებთ, როგორც fallback-ს —
+      // client-მა მაინც უნდა გამოიყენოს საკუთარი ცოცხალი GPS
+      // (expo-location), მაგრამ თუ რაიმე მიზეზით არ აქვს, ეს მაინც
+      // მიახლოებით სწორი კოორდინატებია.
+      return {
+        ok: true,
+        coordinates: session.currentLocation || null,
+      };
     }
 
     // ========================================================
