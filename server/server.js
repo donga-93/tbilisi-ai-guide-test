@@ -4,6 +4,7 @@ const http = require("http");
 const WebSocket = require("ws");
 
 const { toolDeclarations, executeTool } = require("./tools");
+const { verifyClientToken, checkDailyQuota, addUsage } = require("./auth");
 
 // ============================================================
 // Landmarks skeleton
@@ -79,7 +80,11 @@ wss.on("connection", (clientSocket) => {
   const session = {
     authed: false,
 
-    uid: "solo-test-user",
+    uid: null,
+
+    // Quota tracking
+    usageStartAt: null,
+    quotaTimer: null,
 
     geminiSocket: null,
 
@@ -131,7 +136,51 @@ wss.on("connection", (clientSocket) => {
     // ========================================================
 
     if (msg.type === "auth") {
+      let uid;
+
+      try {
+        const verified = await verifyClientToken(msg.idToken);
+        uid = verified.uid;
+      } catch (error) {
+        console.error("Auth failed:", error.message);
+
+        sendError(clientSocket, "Authentication failed");
+
+        clientSocket.close(4003, "Authentication failed");
+
+        return;
+      }
+
+      let quota;
+
+      try {
+        quota = await checkDailyQuota(uid);
+      } catch (error) {
+        console.error("Quota check failed:", error.message);
+
+        sendError(clientSocket, "Quota check failed");
+
+        clientSocket.close(1011, "Quota check failed");
+
+        return;
+      }
+
+      if (!quota.allowed) {
+        console.log(`Daily quota exhausted for uid ${uid}`);
+
+        sendToClient(clientSocket, {
+          type: "quota_exceeded",
+          remainingSeconds: 0,
+        });
+
+        clientSocket.close(4029, "Daily quota exceeded");
+
+        return;
+      }
+
       session.authed = true;
+      session.uid = uid;
+      session.usageStartAt = Date.now();
 
       session.preferredLanguage =
         typeof msg.preferredLanguage === "string"
@@ -139,7 +188,9 @@ wss.on("connection", (clientSocket) => {
           : null;
 
       console.log(
-        "Client authenticated: solo-test-user" +
+        `Client authenticated: ${uid}, remaining today: ${Math.round(
+          quota.remainingSeconds / 60,
+        )} min` +
           (session.preferredLanguage
             ? ` (${session.preferredLanguage})`
             : " (no preferredLanguage)"),
@@ -147,7 +198,28 @@ wss.on("connection", (clientSocket) => {
 
       sendToClient(clientSocket, {
         type: "auth_ok",
+        remainingSeconds: quota.remainingSeconds,
       });
+
+      // ------------------------------------------------------
+      // Hard cap enforcement: close the session automatically
+      // once the remaining daily quota elapses, mid-session.
+      // ------------------------------------------------------
+
+      session.quotaTimer = setTimeout(() => {
+        console.log(`Quota timer fired for uid ${uid} — closing session`);
+
+        sendToClient(clientSocket, {
+          type: "quota_exceeded",
+          remainingSeconds: 0,
+        });
+
+        try {
+          clientSocket.close(4029, "Daily quota exceeded");
+        } catch (error) {
+          console.error("Error closing client socket on quota:", error.message);
+        }
+      }, quota.remainingSeconds * 1000);
 
       connectToGeminiLive(clientSocket, session);
 
@@ -281,6 +353,20 @@ wss.on("connection", (clientSocket) => {
 
   clientSocket.on("close", () => {
     console.log("Client disconnected");
+
+    if (session.quotaTimer) {
+      clearTimeout(session.quotaTimer);
+      session.quotaTimer = null;
+    }
+
+    if (session.uid && session.usageStartAt) {
+      const usedSeconds = (Date.now() - session.usageStartAt) / 1000;
+      session.usageStartAt = null;
+
+      addUsage(session.uid, usedSeconds).catch((error) => {
+        console.error("Failed to record usage:", error.message);
+      });
+    }
 
     session.reconnecting = false;
 
@@ -1166,5 +1252,5 @@ server.listen(PORT, "0.0.0.0", () => {
 
   console.log("Custom tools: ENABLED");
 
-  console.log("Test authentication mode: ENABLED");
+  console.log("Firestore-backed daily quota: ENABLED");
 });
