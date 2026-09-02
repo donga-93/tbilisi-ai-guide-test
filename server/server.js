@@ -8,10 +8,6 @@ const { verifyClientToken, checkDailyQuota, addUsage } = require("./auth");
 
 // ============================================================
 // Landmarks skeleton
-//
-// Only name + type are sent into Gemini's live context.
-// Full descriptions stay in session.landmarks and are retrieved
-// through getLandmarkDetails when needed.
 // ============================================================
 
 function buildLandmarksSkeletonText(landmarks) {
@@ -22,8 +18,9 @@ function buildLandmarksSkeletonText(landmarks) {
   const lines = landmarks.map((l) => `- ${l.title} (${l.type})`).join("\n");
 
   return (
-    "თბილისის ღირსშესანიშნაობების სია — თუ საუბარში რომელიმეს ახსენებენ, " +
-    "გამოიყენე მხოლოდ საორიენტაციოდ. დეტალური ინფორმაციისთვის " +
+    "საქართველოს ღირსშესანიშნაობების სია (თბილისი და სხვა რეგიონები) — " +
+    "თუ საუბარში რომელიმეს ახსენებენ, გამოიყენე მხოლოდ საორიენტაციოდ. " +
+    "დეტალური ინფორმაციისთვის " +
     `გამოიძახე getLandmarkDetails:\n${lines}`
   );
 }
@@ -73,50 +70,24 @@ const wss = new WebSocket.Server({
 wss.on("connection", (clientSocket) => {
   console.log("Client connected");
 
-  // ==========================================================
-  // Per-client session
-  // ==========================================================
-
   const session = {
     authed: false,
-
     uid: null,
-
-    // Quota tracking
     usageStartAt: null,
     quotaTimer: null,
-
     geminiSocket: null,
-
     currentLocation: null,
-
     landmarks: null,
-
     nearbyPlacesCache: [],
-
-    // Last Google Search result is kept only for this session.
     lastSearchResults: null,
-
-    // Gemini Live session resumption
     resumptionToken: null,
-
     reconnecting: false,
-
-    // Prevent duplicate landmark context injection
     landmarksInjected: false,
-
     preferredLanguage: null,
-
-    // Prevent processing stale Gemini sockets
     connectionGeneration: 0,
-    // Timing diagnostics
     lastAudioReceivedAt: null,
     firstResponseAt: null,
   };
-
-  // ==========================================================
-  // Messages from React Native
-  // ==========================================================
 
   clientSocket.on("message", async (raw) => {
     let msg;
@@ -125,15 +96,9 @@ wss.on("connection", (clientSocket) => {
       msg = JSON.parse(raw.toString());
     } catch (error) {
       console.error("Invalid client JSON:", error.message);
-
       sendError(clientSocket, "Malformed JSON");
-
       return;
     }
-
-    // ========================================================
-    // Authentication
-    // ========================================================
 
     if (msg.type === "auth") {
       let uid;
@@ -143,11 +108,8 @@ wss.on("connection", (clientSocket) => {
         uid = verified.uid;
       } catch (error) {
         console.error("Auth failed:", error.message);
-
         sendError(clientSocket, "Authentication failed");
-
         clientSocket.close(4003, "Authentication failed");
-
         return;
       }
 
@@ -157,31 +119,24 @@ wss.on("connection", (clientSocket) => {
         quota = await checkDailyQuota(uid);
       } catch (error) {
         console.error("Quota check failed:", error.message);
-
         sendError(clientSocket, "Quota check failed");
-
         clientSocket.close(1011, "Quota check failed");
-
         return;
       }
 
       if (!quota.allowed) {
         console.log(`Daily quota exhausted for uid ${uid}`);
-
         sendToClient(clientSocket, {
           type: "quota_exceeded",
           remainingSeconds: 0,
         });
-
         clientSocket.close(4029, "Daily quota exceeded");
-
         return;
       }
 
       session.authed = true;
       session.uid = uid;
       session.usageStartAt = Date.now();
-
       session.preferredLanguage =
         typeof msg.preferredLanguage === "string"
           ? msg.preferredLanguage
@@ -201,19 +156,12 @@ wss.on("connection", (clientSocket) => {
         remainingSeconds: quota.remainingSeconds,
       });
 
-      // ------------------------------------------------------
-      // Hard cap enforcement: close the session automatically
-      // once the remaining daily quota elapses, mid-session.
-      // ------------------------------------------------------
-
       session.quotaTimer = setTimeout(() => {
         console.log(`Quota timer fired for uid ${uid} — closing session`);
-
         sendToClient(clientSocket, {
           type: "quota_exceeded",
           remainingSeconds: 0,
         });
-
         try {
           clientSocket.close(4029, "Daily quota exceeded");
         } catch (error) {
@@ -222,94 +170,53 @@ wss.on("connection", (clientSocket) => {
       }, quota.remainingSeconds * 1000);
 
       connectToGeminiLive(clientSocket, session);
-
       return;
     }
-
-    // ========================================================
-    // Everything below requires authenticated session
-    // ========================================================
 
     if (!session.authed) {
       sendError(clientSocket, "Not authenticated");
-
       return;
     }
-
-    // ========================================================
-    // Ping
-    // ========================================================
 
     if (msg.type === "ping") {
-      sendToClient(clientSocket, {
-        type: "pong",
-      });
-
+      sendToClient(clientSocket, { type: "pong" });
       return;
     }
-
-    // ========================================================
-    // Context
-    //
-    // Context is allowed before Gemini is ready.
-    // ========================================================
 
     if (msg.type === "context") {
       if (msg.currentLocation) {
         session.currentLocation = msg.currentLocation;
       }
-
       if (msg.landmarks && msg.landmarks.length > 0) {
         session.landmarks = msg.landmarks;
       }
-
-      // Gemini not ready yet.
       if (
         !session.geminiSocket ||
         session.geminiSocket.readyState !== WebSocket.OPEN
       ) {
         return;
       }
-
       sendContextToGemini(session, msg);
-
       return;
     }
-
-    // ========================================================
-    // Everything else requires Gemini ready
-    // ========================================================
 
     if (
       !session.geminiSocket ||
       session.geminiSocket.readyState !== WebSocket.OPEN
     ) {
-      // Brief, transient gap (e.g. server-side reconnect in progress
-      // after a Gemini socket hiccup): drop audio silently instead of
-      // erroring the whole client session. A fresh gemini_ready will
-      // arrive shortly once reconnect completes; forcing a full
-      // client-side reconnect for a 1-second gap is disproportionate.
       if (session.reconnecting) {
         return;
       }
-
       sendError(clientSocket, "Gemini session not ready yet");
-
       return;
     }
-
-    // ========================================================
-    // Audio
-    // ========================================================
 
     if (msg.type === "audio") {
       if (!msg.data) {
         sendError(clientSocket, "Audio data is missing");
-
         return;
       }
       session.lastAudioReceivedAt = Date.now();
-
       try {
         session.geminiSocket.send(
           JSON.stringify({
@@ -324,32 +231,16 @@ wss.on("connection", (clientSocket) => {
       } catch (error) {
         console.error("Failed to send audio to Gemini:", error.message);
       }
-
       return;
     }
-
-    // ========================================================
-    // Client interruption
-    // ========================================================
 
     if (msg.type === "interrupt") {
       console.log("Client requested interruption");
-
-      // Gemini Live handles interruption
-      // through realtime input.
       return;
     }
 
-    // ========================================================
-    // Unknown message
-    // ========================================================
-
     sendError(clientSocket, `Unknown message type: ${msg.type}`);
   });
-
-  // ==========================================================
-  // Client disconnected
-  // ==========================================================
 
   clientSocket.on("close", () => {
     console.log("Client disconnected");
@@ -362,18 +253,15 @@ wss.on("connection", (clientSocket) => {
     if (session.uid && session.usageStartAt) {
       const usedSeconds = (Date.now() - session.usageStartAt) / 1000;
       session.usageStartAt = null;
-
       addUsage(session.uid, usedSeconds).catch((error) => {
         console.error("Failed to record usage:", error.message);
       });
     }
 
     session.reconnecting = false;
-
     session.connectionGeneration += 1;
 
     const geminiSocket = session.geminiSocket;
-
     session.geminiSocket = null;
 
     if (geminiSocket && geminiSocket.readyState === WebSocket.OPEN) {
@@ -384,10 +272,6 @@ wss.on("connection", (clientSocket) => {
       }
     }
   });
-
-  // ==========================================================
-  // Client socket error
-  // ==========================================================
 
   clientSocket.on("error", (error) => {
     console.error("Client WebSocket error:", error.message);
@@ -406,15 +290,10 @@ function sendContextToGemini(session, msg) {
     return;
   }
 
-  // ----------------------------------------------------------
-  // Landmarks
-  // ----------------------------------------------------------
-
   if (msg.landmarks && msg.landmarks.length > 0) {
     session.landmarks = msg.landmarks;
 
     const skeletonText = buildLandmarksSkeletonText(msg.landmarks);
-
     const fullContext = `[SYSTEM CONTEXT — not spoken by user]\n${skeletonText}`;
 
     try {
@@ -424,29 +303,19 @@ function sendContextToGemini(session, msg) {
             turns: [
               {
                 role: "user",
-                parts: [
-                  {
-                    text: fullContext,
-                  },
-                ],
+                parts: [{ text: fullContext }],
               },
             ],
             turnComplete: false,
           },
         }),
       );
-
       session.landmarksInjected = true;
-
       console.log("Landmarks skeleton sent:", msg.landmarks.length, "items");
     } catch (error) {
       console.error("Failed to send landmark context:", error.message);
     }
   }
-
-  // ----------------------------------------------------------
-  // Current nearby landmarks
-  // ----------------------------------------------------------
 
   if (msg.nearbyLandmarks && msg.nearbyLandmarks.length > 0) {
     const nearbyText =
@@ -463,27 +332,18 @@ function sendContextToGemini(session, msg) {
             turns: [
               {
                 role: "user",
-                parts: [
-                  {
-                    text: nearbyText,
-                  },
-                ],
+                parts: [{ text: nearbyText }],
               },
             ],
             turnComplete: false,
           },
         }),
       );
-
       console.log("Nearby landmarks updated:", msg.nearbyLandmarks.join(", "));
     } catch (error) {
       console.error("Failed to send nearby landmarks:", error.message);
     }
   }
-
-  // ----------------------------------------------------------
-  // Additional context
-  // ----------------------------------------------------------
 
   if (msg.text) {
     try {
@@ -528,22 +388,14 @@ function connectToGeminiLive(clientSocket, session) {
   );
 
   const geminiSocket = new WebSocket(GEMINI_LIVE_URL);
-
   session.geminiSocket = geminiSocket;
-
   session.reconnecting = false;
 
-  // ==========================================================
-  // Gemini socket opened
-  // ==========================================================
-
   geminiSocket.on("open", () => {
-    // Ignore stale socket
     if (session.connectionGeneration !== generation) {
       try {
         geminiSocket.close();
       } catch {}
-
       return;
     }
 
@@ -572,7 +424,11 @@ function connectToGeminiLive(clientSocket, session) {
 
     const systemInstructionText =
       languageInstruction +
-      "You are a concise Tbilisi tour guide in a real-time voice conversation. " +
+      // ⬅️ შეცვლილია: Tbilisi → Georgia
+      "You are a concise Georgia travel guide in a real-time voice conversation. " +
+      "You cover all of Georgia — its regions, cities, towns, villages, and landmarks. " +
+      "When relevant, mention Tbilisi as the capital city of Georgia, " +
+      "but do not limit yourself to Tbilisi alone. " +
       "Wait for the user to speak first. Do not start speaking automatically. " +
       "Once the user speaks, respond naturally and conversationally. " +
       "Keep answers concise and suitable for real-time voice conversation. " +
@@ -580,7 +436,6 @@ function connectToGeminiLive(clientSocket, session) {
       // ------------------------------------------------------
       // Local catalog
       // ------------------------------------------------------
-
       "You have access to a local landmark catalog, but it is NOT your only source. " +
       "The catalog is not guaranteed to be complete. " +
       "Never assume that a place or fact is unavailable merely because it is not in the catalog. " +
@@ -590,7 +445,6 @@ function connectToGeminiLive(clientSocket, session) {
       // ------------------------------------------------------
       // Google Search
       // ------------------------------------------------------
-
       "You also have access to the built-in Google Search tool. " +
       "Use Google Search when the user asks about a real-world place, landmark, restaurant, " +
       "cafe, hotel, shop, attraction, museum, street, neighborhood, event, business, " +
@@ -606,21 +460,13 @@ function connectToGeminiLive(clientSocket, session) {
       // ------------------------------------------------------
       // Nearby places
       // ------------------------------------------------------
-
       "You can also use findNearbyPlaces for nearby restaurants, hotels, nightlife, " +
       "shopping, stores, cafes, gas stations, pharmacies, parks, public transport, and ATMs. " +
       "Use findNearbyPlaces when the user asks for nearby places or recommendations " +
       "based on their current location. " +
       // ------------------------------------------------------
       // Open now / closed handling
-      //
-      // NEW: findNearbyPlaces results now include an isOpen field
-      // per place (true / false / null), and the tool response may
-      // include a fartherOpenAlternative when the closest results
-      // are all currently closed. This block tells Gemini how to
-      // use that data in conversation.
       // ------------------------------------------------------
-
       "Every result from findNearbyPlaces includes an isOpen field: " +
       "true means the place is open right now, false means it is currently closed, " +
       "and null means opening hours are unknown. " +
@@ -634,12 +480,7 @@ function connectToGeminiLive(clientSocket, session) {
       "is unknown rather than assuming it is open. " +
       // ------------------------------------------------------
       // Current location
-      //
-      // NEW: getCurrentLocationInfo answers "where am I" questions
-      // using the nearest point of interest plus a reverse-geocoded
-      // address, so Gemini should call it instead of guessing.
       // ------------------------------------------------------
-
       "Use getCurrentLocationInfo when the user asks where they currently are, " +
       "or what place, business, or landmark they are standing at or near right now " +
       "(for example 'სად ვარ მე?', 'რა ადგილას ვარ?', 'რა არის ეს ადგილი?', 'what is this place'). " +
@@ -651,33 +492,24 @@ function connectToGeminiLive(clientSocket, session) {
       // ------------------------------------------------------
       // Exact names
       // ------------------------------------------------------
-
       "When calling getLandmarkDetails, openPlaceOnMap, or showRouteToPlace, " +
       "use the exact place name returned by the landmark catalog or findNearbyPlaces. " +
       "Do not translate or transliterate the tool argument. " +
       // ------------------------------------------------------
       // Nearby recommendations
       // ------------------------------------------------------
-
       "If the user asks what is interesting nearby, use the nearby landmark context " +
       "when appropriate and recommend a small number of relevant places. " +
       // ------------------------------------------------------
       // Map
       // ------------------------------------------------------
-
       "If the user asks to see a specific place on the map, call openPlaceOnMap. " +
       "If the user wants directions or a route to a specific place, call showRouteToPlace. " +
       "Only call showRouteToPlace when the user clearly requests directions or a route. " +
       "Do not call it speculatively. " +
       // ------------------------------------------------------
       // Plain map / own location on map
-      //
-      // NEW: openMap just opens/clears the map view. showMyLocationOnMap
-      // opens the map centered on the user's own GPS position. Neither
-      // takes a placeId — they are for when the user is not referring to
-      // any specific named place.
       // ------------------------------------------------------
-
       "If the user simply asks to open or show the map, with no specific place mentioned " +
       "(for example 'გახსენი რუკა', 'open the map'), call openMap. " +
       "If the user asks to see their own current location on the map (for example " +
@@ -688,7 +520,6 @@ function connectToGeminiLive(clientSocket, session) {
       // ------------------------------------------------------
       // Tool failures
       // ------------------------------------------------------
-
       "If getLandmarkDetails returns found:false, use Google Search instead of giving up. " +
       "If Google Search finds useful information, answer using that information. " +
       "If openPlaceOnMap or showRouteToPlace returns found:false, " +
@@ -698,121 +529,64 @@ function connectToGeminiLive(clientSocket, session) {
       // ------------------------------------------------------
       // Important web → map rule
       // ------------------------------------------------------
-
       "If you discover a specific place through Google Search and the user then asks to see it on the map " +
       "or get directions to it, use findNearbyPlaces first to resolve that place through Google Places " +
       "and obtain its coordinates. Then call openPlaceOnMap or showRouteToPlace with the exact returned name. " +
       // ------------------------------------------------------
       // Georgian century rule
       // ------------------------------------------------------
-
       "When speaking Georgian and referring to a century, use the correct ordinal form, " +
       "for example 'მეცამეტე საუკუნე', not 'ცამეტი საუკუნე'. " +
       // ------------------------------------------------------
       // Safety filter
       // ------------------------------------------------------
-
       "If the user asks about visiting unsafe, abandoned, restricted, or generally " +
       "not-recommended areas (e.g. abandoned buildings, unlit or unsafe areas at night, " +
       "border zones), do not give directions to or encourage visiting them. " +
       "Instead, gently acknowledge their interest and suggest a safe, thematically similar " +
-      "alternative from the local landmark catalog or Google Search. " +
+      "alternative from the landmark catalog or Google Search. " +
       "Never confirm that an unfamiliar place is safe unless you have reliable information " +
       "about it. " +
       // ------------------------------------------------------
       // Landmarks skeleton
       // ------------------------------------------------------
-
       (session.landmarks && session.landmarks.length > 0
         ? "\n\n" + buildLandmarksSkeletonText(session.landmarks)
         : "");
 
-    // ========================================================
-    // Gemini setup
-    // ========================================================
-
     const setupMessage = {
       setup: {
         model: modelName,
-
         generationConfig: {
           responseModalities: ["AUDIO"],
           thinkingConfig: {
             thinkingBudget: 0,
           },
         },
-
-        // ------------------------------------------------------
-        // Voice Activity Detection
-        // ------------------------------------------------------
-
         realtimeInputConfig: {
           automaticActivityDetection: {
             disabled: false,
-
             startOfSpeechSensitivity: "START_SENSITIVITY_HIGH",
-
             endOfSpeechSensitivity: "END_SENSITIVITY_LOW",
-
             prefixPaddingMs: 300,
-
             silenceDurationMs: 800,
           },
         },
-
-        // ------------------------------------------------------
-        // Context compression
-        // ------------------------------------------------------
-
         contextWindowCompression: {
           slidingWindow: {},
         },
-
-        // ------------------------------------------------------
-        // Session resumption
-        // ------------------------------------------------------
-
         sessionResumption: session.resumptionToken
-          ? {
-              handle: session.resumptionToken,
-            }
+          ? { handle: session.resumptionToken }
           : {},
-
-        // ------------------------------------------------------
-        // System instruction
-        // ------------------------------------------------------
-
         systemInstruction: {
-          parts: [
-            {
-              text: systemInstructionText,
-            },
-          ],
+          parts: [{ text: systemInstructionText }],
         },
-
-        // ------------------------------------------------------
-        // Tools
-        //
-        // IMPORTANT:
-        //
-        // googleSearch is Gemini's BUILT-IN Google Search.
-        //
-        // toolDeclarations contains only our custom tools.
-        // ------------------------------------------------------
-
-        tools: [
-          {
-            googleSearch: {},
-          },
-
-          ...toolDeclarations,
-        ],
+        tools: [{ googleSearch: {} }, ...toolDeclarations],
       },
     };
 
     try {
       geminiSocket.send(JSON.stringify(setupMessage));
-
       console.log(
         "Gemini setup sent with built-in Google Search + custom tools",
       );
@@ -821,12 +595,7 @@ function connectToGeminiLive(clientSocket, session) {
     }
   });
 
-  // ==========================================================
-  // Messages from Gemini
-  // ==========================================================
-
   geminiSocket.on("message", async (raw) => {
-    // Ignore stale socket
     if (session.connectionGeneration !== generation) {
       return;
     }
@@ -837,27 +606,15 @@ function connectToGeminiLive(clientSocket, session) {
       msg = JSON.parse(raw.toString());
     } catch (error) {
       console.error("Invalid Gemini message:", error.message);
-
       return;
     }
 
-    // ======================================================
-    // Setup complete
-    // ======================================================
-
     if (msg.setupComplete) {
       console.log("Gemini Live session ready");
-
       sendToClient(clientSocket, {
         type: "gemini_ready",
-
         needsLandmarks: !session.landmarks || session.landmarks.length === 0,
       });
-
-      // ----------------------------------------------------
-      // Context arrived before Gemini became ready
-      // ----------------------------------------------------
-
       if (
         session.landmarks &&
         session.landmarks.length > 0 &&
@@ -865,54 +622,29 @@ function connectToGeminiLive(clientSocket, session) {
       ) {
         sendContextToGemini(session, {
           landmarks: session.landmarks,
-
           currentLocation: session.currentLocation,
         });
       }
-
       return;
     }
-
-    // ======================================================
-    // Session resumption
-    // ======================================================
 
     if (msg.sessionResumptionUpdate) {
       const update = msg.sessionResumptionUpdate;
-
       if (update.resumable && update.newHandle) {
         session.resumptionToken = update.newHandle;
-
         console.log("Gemini session resumption token updated");
       }
-
       return;
     }
-
-    // ======================================================
-    // Gemini API error
-    // ======================================================
 
     if (msg.error) {
       console.error("Gemini API error:", JSON.stringify(msg.error));
-
       sendToClient(clientSocket, {
         type: "error",
-
         message: msg.error.message || "Gemini API error",
       });
-
       return;
     }
-
-    // ======================================================
-    // Custom tool calls
-    //
-    // NOTE:
-    // Built-in googleSearch calls are handled internally
-    // by Gemini and do NOT arrive here as our custom
-    // function calls.
-    // ======================================================
 
     if (msg.toolCall) {
       await handleGeminiToolCalls(
@@ -921,33 +653,21 @@ function connectToGeminiLive(clientSocket, session) {
         session,
         msg.toolCall,
       );
-
       return;
     }
 
-    // ======================================================
-    // Model response
-    // ======================================================
-
     const serverContent = msg.serverContent;
-
     if (!serverContent) {
       return;
     }
 
     const parts = serverContent.modelTurn?.parts || [];
 
-    // ======================================================
-    // Timing diagnostics — first chunk of this turn
-    // ======================================================
-
     if (parts.length > 0 && !session.firstResponseAt) {
       session.firstResponseAt = Date.now();
-
       const gapMs = session.lastAudioReceivedAt
         ? session.firstResponseAt - session.lastAudioReceivedAt
         : null;
-
       console.log(
         `[TIMING] First response chunk. Gap since last user audio: ${
           gapMs !== null ? gapMs + "ms" : "unknown"
@@ -955,26 +675,13 @@ function connectToGeminiLive(clientSocket, session) {
       );
     }
 
-    // ======================================================
-    // Model output
-    // ======================================================
-
     for (const part of parts) {
-      // ----------------------------------------------------
-      // Audio
-      // ----------------------------------------------------
-
       if (part.inlineData?.data) {
         sendToClient(clientSocket, {
           type: "audio",
           data: part.inlineData.data,
         });
       }
-
-      // ----------------------------------------------------
-      // Text
-      // ----------------------------------------------------
-
       if (part.text) {
         sendToClient(clientSocket, {
           type: "text",
@@ -982,10 +689,6 @@ function connectToGeminiLive(clientSocket, session) {
         });
       }
     }
-
-    // ======================================================
-    // Turn complete
-    // ======================================================
 
     if (serverContent.turnComplete) {
       if (session.firstResponseAt && session.lastAudioReceivedAt) {
@@ -995,19 +698,13 @@ function connectToGeminiLive(clientSocket, session) {
           }ms`,
         );
       }
-
       session.firstResponseAt = null;
       session.lastAudioReceivedAt = null;
-
       sendToClient(clientSocket, {
         type: "turnEnd",
         interrupted: false,
       });
     }
-
-    // ======================================================
-    // Interrupted
-    // ======================================================
 
     if (serverContent.interrupted) {
       sendToClient(clientSocket, {
@@ -1017,28 +714,18 @@ function connectToGeminiLive(clientSocket, session) {
     }
   });
 
-  // ==========================================================
-  // Gemini socket error
-  // ==========================================================
-
   geminiSocket.on("error", (error) => {
     console.error("Gemini Live socket error:", error.message);
   });
 
-  // ==========================================================
-  // Gemini socket close
-  // ==========================================================
-
   geminiSocket.on("close", (code, reason) => {
     const reasonText = reason ? reason.toString() : "";
-
     console.log(
       `[TIMING] Gemini socket closed at ${new Date().toISOString()}: ${code}, reason: ${
         reasonText || "No reason provided"
       }`,
     );
 
-    // Ignore stale connection
     if (session.connectionGeneration !== generation) {
       return;
     }
@@ -1054,19 +741,13 @@ function connectToGeminiLive(clientSocket, session) {
       return;
     }
 
-    // ======================================================
-    // Reconnect
-    // ======================================================
-
     if (!session.reconnecting && clientSocket.readyState === WebSocket.OPEN) {
       session.reconnecting = true;
-
       console.log(
         session.resumptionToken
           ? "Scheduling Gemini reconnect with resumption token..."
           : "Scheduling Gemini reconnect...",
       );
-
       setTimeout(() => {
         if (clientSocket.readyState === WebSocket.OPEN) {
           connectToGeminiLive(clientSocket, session);
@@ -1074,7 +755,6 @@ function connectToGeminiLive(clientSocket, session) {
           session.reconnecting = false;
         }
       }, 300);
-
       return;
     }
 
@@ -1104,10 +784,6 @@ async function handleGeminiToolCalls(
 
   const functionResponses = [];
 
-  // ==========================================================
-  // Execute all custom calls
-  // ==========================================================
-
   for (const call of functionCalls) {
     console.log(`Gemini tool call: ${call.name}`, call.args || {});
 
@@ -1117,31 +793,16 @@ async function handleGeminiToolCalls(
       result = await executeTool(call.name, call.args || {}, session);
     } catch (error) {
       console.error(`Tool "${call.name}" execution error:`, error.message);
-
-      result = {
-        error: "tool_execution_failed",
-      };
+      result = { error: "tool_execution_failed" };
     }
-
-    // ========================================================
-    // Nearby places
-    // ========================================================
 
     if (call.name === "findNearbyPlaces" && result && !result.error) {
       console.log("Nearby places search completed");
     }
 
-    // ========================================================
-    // Current location
-    // ========================================================
-
     if (call.name === "getCurrentLocationInfo" && result && !result.error) {
       console.log("Current location lookup completed");
     }
-
-    // ========================================================
-    // Map actions
-    // ========================================================
 
     if (
       (call.name === "openPlaceOnMap" ||
@@ -1153,43 +814,24 @@ async function handleGeminiToolCalls(
     ) {
       sendToClient(clientSocket, {
         type: "action",
-
         name: call.name,
-
         args: {
           placeId: result.title || call.args?.placeId,
-
           source: result.source,
-
           coordinates: result.coordinates,
-
           address: result.address,
-
           googlePlaceId: result.googlePlaceId,
-
           category: result.category,
         },
       });
     }
 
-    // ========================================================
-    // Function response
-    // ========================================================
-
     functionResponses.push({
       id: call.id,
-
       name: call.name,
-
-      response: result || {
-        error: "empty_tool_response",
-      },
+      response: result || { error: "empty_tool_response" },
     });
   }
-
-  // ==========================================================
-  // Send all custom function responses together
-  // ==========================================================
 
   if (geminiSocket.readyState !== WebSocket.OPEN) {
     return;
@@ -1203,7 +845,6 @@ async function handleGeminiToolCalls(
         },
       }),
     );
-
     console.log(
       `Sent ${functionResponses.length} custom tool response(s) to Gemini`,
     );
@@ -1220,7 +861,6 @@ function sendToClient(socket, message) {
   if (!socket || socket.readyState !== WebSocket.OPEN) {
     return;
   }
-
   try {
     socket.send(JSON.stringify(message));
   } catch (error) {
@@ -1245,12 +885,8 @@ function sendError(socket, message) {
 
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`Gemini Live proxy listening on 0.0.0.0:${PORT}`);
-
   console.log(`Gemini model: ${GEMINI_MODEL}`);
-
   console.log("Google Search: BUILT-IN GEMINI TOOL ENABLED");
-
   console.log("Custom tools: ENABLED");
-
   console.log("Firestore-backed daily quota: ENABLED");
 });
