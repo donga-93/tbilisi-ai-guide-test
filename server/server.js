@@ -2,9 +2,17 @@ require("dotenv").config();
 
 const http = require("http");
 const WebSocket = require("ws");
+const admin = require("firebase-admin");
 
 const { toolDeclarations, executeTool } = require("./tools");
-const { verifyClientToken, checkDailyQuota, addUsage } = require("./auth");
+const {
+  verifyClientToken,
+  checkDailyQuota,
+  addUsage,
+  claimPendingPass,
+} = require("./auth");
+const { handleRevenueCatWebhook } = require("./webhook");
+const { handlePaddleWebhook } = require("./paddleWebhook");
 
 // ============================================================
 // Landmarks skeleton
@@ -56,7 +64,31 @@ const GEMINI_LIVE_URL =
 // HTTP server
 // ============================================================
 
-const server = http.createServer();
+const server = http.createServer((req, res) => {
+  // RevenueCat webhook route.
+  //
+  // wss (WebSocket.Server) მხოლოდ "upgrade" event-ს უსმენს
+  // (path: "/live"-ისთვის) — ჩვეულებრივი HTTP POST request-ები
+  // (როგორიც webhook-ია) აქ, ამ request handler-ში ხვდება,
+  // საერთოდ არ ეჯახება WebSocket ლოგიკას.
+  if (req.method === "POST" && req.url === "/revenuecat-webhook") {
+    handleRevenueCatWebhook(req, res);
+    return;
+  }
+
+  if (req.method === "POST" && req.url === "/paddle-webhook") {
+    handlePaddleWebhook(req, res);
+    return;
+  }
+
+  if (req.method === "POST" && req.url === "/claim-pass") {
+    handleClaimPass(req, res);
+    return;
+  }
+
+  res.writeHead(404);
+  res.end();
+});
 
 const wss = new WebSocket.Server({
   server,
@@ -102,10 +134,12 @@ wss.on("connection", (clientSocket) => {
 
     if (msg.type === "auth") {
       let uid;
+      let isAnonymous; // ⬅️ ახალი
 
       try {
         const verified = await verifyClientToken(msg.idToken);
         uid = verified.uid;
+        isAnonymous = verified.isAnonymous; // ⬅️ ახალი
       } catch (error) {
         console.error("Auth failed:", error.message);
         sendError(clientSocket, "Authentication failed");
@@ -116,7 +150,7 @@ wss.on("connection", (clientSocket) => {
       let quota;
 
       try {
-        quota = await checkDailyQuota(uid);
+        quota = await checkDailyQuota(uid, isAnonymous); // ⬅️ isAnonymous დაემატა
       } catch (error) {
         console.error("Quota check failed:", error.message);
         sendError(clientSocket, "Quota check failed");
@@ -277,6 +311,77 @@ wss.on("connection", (clientSocket) => {
     console.error("Client WebSocket error:", error.message);
   });
 });
+
+// ============================================================
+// POST /claim-pass
+//
+// Client-ი ამას იძახებს sign-in-ის დაუყოვნებლივ შემდეგ, ახალი
+// ID token-ით — თუ ამ email-ზე Paddle webhook-ს უკვე დაუწერია
+// pendingPasses დოკუმენტი (იხ. auth.js/paddleWebhook.js), ის
+// "მიეჩემება" ამჟამინდელ uid-ს.
+// ============================================================
+
+function handleClaimPass(req, res) {
+  let body = "";
+
+  req.on("data", (chunk) => {
+    body += chunk;
+
+    if (body.length > 100_000) {
+      req.destroy();
+    }
+  });
+
+  req.on("end", async () => {
+    let payload;
+
+    try {
+      payload = JSON.parse(body);
+    } catch (error) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Invalid JSON" }));
+      return;
+    }
+
+    let uid;
+
+    try {
+      const verified = await verifyClientToken(payload.idToken);
+      uid = verified.uid;
+    } catch (error) {
+      console.error("claim-pass auth failed:", error.message);
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Authentication failed" }));
+      return;
+    }
+
+    try {
+      const userRecord = await admin.auth().getUser(uid);
+      const email = userRecord.email;
+
+      if (!email) {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ claimed: false }));
+        return;
+      }
+
+      const result = await claimPendingPass(uid, email);
+
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify(
+          result.claimed
+            ? { claimed: true, expiresAt: result.expiresAt.toDate().toISOString() }
+            : { claimed: false },
+        ),
+      );
+    } catch (error) {
+      console.error("claim-pass failed:", error.message);
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Internal error" }));
+    }
+  });
+}
 
 // ============================================================
 // Send stored context to Gemini
