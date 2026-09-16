@@ -44,6 +44,10 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const GEMINI_MODEL =
   process.env.GEMINI_LIVE_MODEL || "gemini-2.5-flash-native-audio-latest";
 
+// Max consecutive Gemini reconnect attempts before giving up on a session.
+// Resets to 0 on every successful Gemini connection (see geminiSocket "open").
+const MAX_GEMINI_RECONNECT_ATTEMPTS = 5;
+
 // ============================================================
 // Gemini Live endpoint
 // ============================================================
@@ -114,6 +118,8 @@ wss.on("connection", (clientSocket) => {
     lastSearchResults: null,
     resumptionToken: null,
     reconnecting: false,
+    reconnectAttempts: 0,
+    reconnectTimer: null,
     landmarksInjected: false,
     preferredLanguage: null,
     connectionGeneration: 0,
@@ -282,6 +288,11 @@ wss.on("connection", (clientSocket) => {
     if (session.quotaTimer) {
       clearTimeout(session.quotaTimer);
       session.quotaTimer = null;
+    }
+
+    if (session.reconnectTimer) {
+      clearTimeout(session.reconnectTimer);
+      session.reconnectTimer = null;
     }
 
     if (session.uid && session.usageStartAt) {
@@ -505,6 +516,10 @@ function connectToGeminiLive(clientSocket, session) {
     }
 
     console.log("Connected to Gemini Live");
+
+    // A successful connection clears the retry count — the next
+    // unexpected close starts counting from zero again.
+    session.reconnectAttempts = 0;
 
     const modelName = GEMINI_MODEL.startsWith("models/")
       ? GEMINI_MODEL
@@ -802,28 +817,57 @@ function connectToGeminiLive(clientSocket, session) {
       return;
     }
 
-    if (!session.reconnecting && clientSocket.readyState === WebSocket.OPEN) {
-      session.reconnecting = true;
-      console.log(
-        session.resumptionToken
-          ? "Scheduling Gemini reconnect with resumption token..."
-          : "Scheduling Gemini reconnect...",
-      );
-      setTimeout(() => {
-        if (clientSocket.readyState === WebSocket.OPEN) {
-          connectToGeminiLive(clientSocket, session);
-        } else {
-          session.reconnecting = false;
-        }
-      }, 300);
+    if (clientSocket.readyState !== WebSocket.OPEN) {
+      session.reconnecting = false;
       return;
     }
 
-    sendToClient(clientSocket, {
-      type: "sessionEnd",
-      code,
-      reason: reasonText,
-    });
+    // A reconnect timer is already pending (or an attempt is already in
+    // flight) for this session — never schedule a second one.
+    if (session.reconnecting || session.reconnectTimer) {
+      return;
+    }
+
+    if (session.reconnectAttempts >= MAX_GEMINI_RECONNECT_ATTEMPTS) {
+      console.error(
+        `Gemini reconnect attempts exhausted (${session.reconnectAttempts}/` +
+          `${MAX_GEMINI_RECONNECT_ATTEMPTS}) — ending session`,
+      );
+      sendToClient(clientSocket, {
+        type: "sessionEnd",
+        code,
+        reason: "max_reconnect_attempts_exceeded",
+      });
+      try {
+        clientSocket.close(1011, "Gemini reconnect attempts exhausted");
+      } catch (error) {
+        console.error(
+          "Error closing client socket after exhausted retries:",
+          error.message,
+        );
+      }
+      return;
+    }
+
+    session.reconnecting = true;
+    session.reconnectAttempts += 1;
+
+    console.log(
+      (session.resumptionToken
+        ? "Scheduling Gemini reconnect with resumption token"
+        : "Scheduling Gemini reconnect") +
+        ` (attempt ${session.reconnectAttempts}/${MAX_GEMINI_RECONNECT_ATTEMPTS})...`,
+    );
+
+    session.reconnectTimer = setTimeout(() => {
+      session.reconnectTimer = null;
+
+      if (clientSocket.readyState === WebSocket.OPEN) {
+        connectToGeminiLive(clientSocket, session);
+      } else {
+        session.reconnecting = false;
+      }
+    }, 300);
   });
 }
 
