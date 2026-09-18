@@ -6,13 +6,16 @@ const admin = require("firebase-admin");
 
 const { toolDeclarations, executeTool } = require("./tools");
 const {
+  db,
   verifyClientToken,
   checkDailyQuota,
   addUsage,
   claimPendingPass,
+  notifyLimitReachedForUid,
 } = require("./auth");
 const { handleRevenueCatWebhook } = require("./webhook");
 const { handlePaddleWebhook } = require("./paddleWebhook");
+const { sendWelcomeEmail } = require("./welcomeEmail");
 
 // ============================================================
 // Landmarks skeleton
@@ -90,6 +93,16 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  if (req.method === "POST" && req.url === "/register-user") {
+    handleRegisterUser(req, res);
+    return;
+  }
+
+  if (req.method === "POST" && req.url === "/notify-limit-reached") {
+    handleNotifyLimitReached(req, res);
+    return;
+  }
+
   res.writeHead(404);
   res.end();
 });
@@ -156,7 +169,7 @@ wss.on("connection", (clientSocket) => {
       let quota;
 
       try {
-        quota = await checkDailyQuota(uid, isAnonymous); // ⬅️ isAnonymous დაემატა
+        quota = await checkDailyQuota(uid, isAnonymous, msg.preferredLanguage); // ⬅️ isAnonymous + locale დაემატა
       } catch (error) {
         console.error("Quota check failed:", error.message);
         sendError(clientSocket, "Quota check failed");
@@ -382,12 +395,151 @@ function handleClaimPass(req, res) {
       res.end(
         JSON.stringify(
           result.claimed
-            ? { claimed: true, expiresAt: result.expiresAt.toDate().toISOString() }
+            ? {
+                claimed: true,
+                expiresAt: result.expiresAt.toDate().toISOString(),
+              }
             : { claimed: false },
         ),
       );
     } catch (error) {
       console.error("claim-pass failed:", error.message);
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Internal error" }));
+    }
+  });
+}
+
+// ============================================================
+// POST /register-user
+//
+// Client-ი ამას იძახებს პირველი წარმატებული sign-in-ის შემდეგ,
+// device locale-ით — თუ ჯერ არ გაუგზავნია welcome email
+// (users/{uid}.welcomeEmailSent !== true), აგზავნის მას და
+// წერს დროშას, რომ მეორედ აღარ გაიგზავნოს.
+// ============================================================
+
+function handleRegisterUser(req, res) {
+  let body = "";
+
+  req.on("data", (chunk) => {
+    body += chunk;
+
+    if (body.length > 100_000) {
+      req.destroy();
+    }
+  });
+
+  req.on("end", async () => {
+    let payload;
+
+    try {
+      payload = JSON.parse(body);
+    } catch (error) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Invalid JSON" }));
+      return;
+    }
+
+    let decodedToken;
+
+    try {
+      decodedToken = await admin.auth().verifyIdToken(payload.idToken);
+    } catch (error) {
+      console.error("register-user auth failed:", error.message);
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Authentication failed" }));
+      return;
+    }
+
+    try {
+      const uid = decodedToken.uid;
+      const userRef = db.collection("users").doc(uid);
+      const userDoc = await userRef.get();
+      const alreadySent =
+        userDoc.exists && userDoc.data().welcomeEmailSent === true;
+
+      let sent = false;
+
+      if (!alreadySent && decodedToken.email) {
+        const result = await sendWelcomeEmail(
+          decodedToken.email,
+          payload.locale,
+        );
+
+        if (result.success) {
+          await userRef.set({ welcomeEmailSent: true }, { merge: true });
+          sent = true;
+        } else {
+          console.error("register-user: welcome email failed:", result.error);
+        }
+      }
+
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ sent }));
+    } catch (error) {
+      console.error("register-user failed:", error.message);
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Internal error" }));
+    }
+  });
+}
+
+// ============================================================
+// POST /notify-limit-reached
+//
+// Client-ი ამას იძახებს text-chat-ის დღიური ლიმიტის ამოწურვისას
+// (type: "text"). ხმოვანი (Live) ლიმიტისთვის იგივე throttle +
+// გაგზავნის ლოგიკა (notifyLimitReachedForUid, auth.js) პირდაპირ
+// server-ის მხრიდან იძახება, client-ის მოთხოვნის გარეშე — იხ.
+// checkDailyQuota.
+// ============================================================
+
+function handleNotifyLimitReached(req, res) {
+  let body = "";
+
+  req.on("data", (chunk) => {
+    body += chunk;
+
+    if (body.length > 100_000) {
+      req.destroy();
+    }
+  });
+
+  req.on("end", async () => {
+    let payload;
+
+    try {
+      payload = JSON.parse(body);
+    } catch (error) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Invalid JSON" }));
+      return;
+    }
+
+    let decodedToken;
+
+    try {
+      decodedToken = await admin.auth().verifyIdToken(payload.idToken);
+    } catch (error) {
+      console.error("notify-limit-reached auth failed:", error.message);
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Authentication failed" }));
+      return;
+    }
+
+    try {
+      const type = payload.type === "voice" ? "voice" : "text";
+      const result = await notifyLimitReachedForUid(
+        decodedToken.uid,
+        payload.locale,
+        type,
+      );
+
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(result));
+    } catch (error) {
+      console.error("notify-limit-reached failed:", error.message);
       res.writeHead(500, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "Internal error" }));
     }

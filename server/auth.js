@@ -1,5 +1,7 @@
 const admin = require("firebase-admin");
 
+const { sendLimitReachedEmail } = require("./welcomeEmail");
+
 // ============================================================
 // Credentials
 //
@@ -56,6 +58,8 @@ const TESTER_SESSION_CAP_SECONDS = Number(
 
 const TRIP_PASS_DURATION_MS = 7 * 24 * 60 * 60 * 1000; // Paddle 7-Day Trip Pass
 
+const LIMIT_REACHED_EMAIL_THROTTLE_MS = 7 * 24 * 60 * 60 * 1000; // მაქს. 1 email კვირაში
+
 // ============================================================
 // Token-ის ვერიფიკაცია
 // ============================================================
@@ -105,7 +109,7 @@ async function getAccessLevel(uid) {
 // აბრუნებს { allowed, remainingSeconds, dailyLimitSeconds, isTesterBypass }
 // ============================================================
 
-async function checkDailyQuota(uid, isAnonymous) {
+async function checkDailyQuota(uid, isAnonymous, locale) {
   const { isSubscribed, isTester, hasActiveTripPass } =
     await getAccessLevel(uid);
 
@@ -133,13 +137,71 @@ async function checkDailyQuota(uid, isAnonymous) {
 
   const usedSeconds = doc.exists ? doc.data().secondsUsed || 0 : 0;
   const remainingSeconds = Math.max(0, dailyLimitSeconds - usedSeconds);
+  const allowed = remainingSeconds > 0;
+
+  if (!allowed) {
+    // ⬅️ ახალი: ხმოვანი (Live) დღიური ლიმიტის ამოწურვისას, server-side,
+    // ცალკე client-ის მოთხოვნის გარეშე — fire-and-forget, quota-ს
+    // პასუხს არასდროს აყოვნებს და არასდროს ისვრის.
+    notifyLimitReachedForUid(uid, locale, "voice").catch((error) => {
+      console.error("Voice limit-reached email failed:", error.message);
+    });
+  }
 
   return {
-    allowed: remainingSeconds > 0,
+    allowed,
     remainingSeconds,
     dailyLimitSeconds,
     isTesterBypass: false,
   };
+}
+
+// ============================================================
+// Limit-reached email — throttle (7 დღეში ერთხელ) + გაგზავნა.
+//
+// გამოიძახება ორი გზით:
+//   - აქედან ზემოთ, checkDailyQuota-ს მიერ, ხმოვანი quota-ს
+//     ამოწურვისას (type: "voice"), client-ის მოთხოვნის გარეშე
+//   - server.js-ის POST /notify-limit-reached-იდან (type: "text"),
+//     text-chat-ის დღიური ლიმიტისთვის, client-ის მოთხოვნით
+// ============================================================
+async function notifyLimitReachedForUid(uid, locale, type) {
+  const userRef = db.collection("users").doc(uid);
+  const userDoc = await userRef.get();
+  const lastSentAt = userDoc.exists
+    ? userDoc.data().limitReachedEmailSentAt
+    : null;
+
+  if (
+    lastSentAt &&
+    Date.now() - lastSentAt.toMillis() < LIMIT_REACHED_EMAIL_THROTTLE_MS
+  ) {
+    return { sent: false, reason: "throttled" };
+  }
+
+  const userRecord = await admin.auth().getUser(uid);
+  const email = userRecord.email;
+
+  if (!email) {
+    return { sent: false, reason: "no_email" };
+  }
+
+  const result = await sendLimitReachedEmail(email, locale);
+
+  if (!result.success) {
+    console.error(
+      `Limit-reached email failed for uid ${uid} (${type}):`,
+      result.error,
+    );
+    return { sent: false, reason: "send_failed" };
+  }
+
+  await userRef.set(
+    { limitReachedEmailSentAt: admin.firestore.FieldValue.serverTimestamp() },
+    { merge: true },
+  );
+
+  return { sent: true };
 }
 
 // ============================================================
@@ -265,12 +327,14 @@ async function claimPendingPass(uid, email) {
 }
 
 module.exports = {
+  db, // ⬅️ ახალი
   verifyClientToken,
   checkDailyQuota,
   addUsage,
   setSubscriptionStatus, // ⬅️ ახალი
   grantTripPassFromWebhook, // ⬅️ ახალი
   claimPendingPass, // ⬅️ ახალი
+  notifyLimitReachedForUid, // ⬅️ ახალი
   GUEST_DAILY_LIMIT_SECONDS,
   DAILY_LIMIT_SECONDS,
   PREMIUM_DAILY_LIMIT_SECONDS,
