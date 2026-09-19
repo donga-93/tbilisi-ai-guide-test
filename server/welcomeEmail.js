@@ -34,13 +34,16 @@ const CHECKOUT_URL = "https://cheerful-gnome-3af2aa.netlify.app/";
 const FROM_ADDRESS = "Georgia Travel AI Guide <onboarding@resend.dev>";
 
 // ------------------------------------------------------------
-// locale JSON-ის ჩატვირთვა — ყოველთვის SUPPORTED_LOCALES-ის
-// ერთ-ერთი literal მნიშვნელობით (client-ისგან მოსული locale
-// ამ სიის მიმართ მოწმდება, სანამ require()-ის path-ში მოხვდება)
+// locale ტექსტების ჩატვირთვა — server/ დირექტორიის საკუთარი,
+// თვითკმარი emailLocales.json-იდან (Railway მხოლოდ server/-ს
+// დეპლოის, ამიტომ client-ის src/locales/-ზე დამოკიდებულება
+// გამორიცხულია)
 // ------------------------------------------------------------
+const EMAIL_LOCALES = require("./emailLocales.json");
+
 function loadLocaleTexts(locale) {
   const safeLocale = SUPPORTED_LOCALES.includes(locale) ? locale : "en";
-  return require(`../src/locales/${safeLocale}.json`).common;
+  return EMAIL_LOCALES[safeLocale] || EMAIL_LOCALES.en;
 }
 
 function renderLink(template) {

@@ -1,0 +1,68 @@
+{
+  "ka": {
+    "welcomeEmailSubject": "კეთილი იყოს თქვენი მობრძანება Georgia Travel AI Guide-ში!",
+    "welcomeEmailBody": "მადლობა, რომ Georgia Travel AI Guide-ს შემოუერთდით! უფასო ვერსია შეზღუდულ წვდომას გთავაზობთ — სრული 7-დღიანი გამოცდილებისთვის თქვენს AI მოგზაურ-გიდთან ერთად, შეიძინეთ Trip Pass აქ: {link}",
+    "limitReachedEmailSubject": "დღიური ლიმიტი ამოიწურა — აი, თქვენი Trip Pass",
+    "limitReachedEmailBody": "დღეს Georgia Travel AI Guide-ის უფასო დღიური ლიმიტი ამოიწურა. მიიღეთ შეუზღუდავი წვდომა მთელი კვირით 7-დღიანი Trip Pass-ით: {link}"
+  },
+  "en": {
+    "welcomeEmailSubject": "Welcome to Georgia Travel AI Guide!",
+    "welcomeEmailBody": "Thanks for joining Georgia Travel AI Guide! The free version comes with limited access — for full 7-day access to your AI travel companion, get your Trip Pass here: {link}",
+    "limitReachedEmailSubject": "Your daily limit is up — here's your Trip Pass",
+    "limitReachedEmailBody": "You've reached today's free limit on Georgia Travel AI Guide. Get unlimited access for a full week with the 7-Day Trip Pass: {link}"
+  },
+  "ru": {
+    "welcomeEmailSubject": "Добро пожаловать в Georgia Travel AI Guide!",
+    "welcomeEmailBody": "Спасибо, что присоединились к Georgia Travel AI Guide! Бесплатная версия предоставляет ограниченный доступ — чтобы получить полный 7-дневный доступ к вашему AI-гиду, оформите Trip Pass здесь: {link}",
+    "limitReachedEmailSubject": "Ваш дневной лимит исчерпан — вот ваш Trip Pass",
+    "limitReachedEmailBody": "Сегодня вы исчерпали бесплатный дневной лимит Georgia Travel AI Guide. Получите неограниченный доступ на целую неделю с 7-дневным Trip Pass: {link}"
+  },
+  "tr": {
+    "welcomeEmailSubject": "Georgia Travel AI Guide'a Hoş Geldiniz!",
+    "welcomeEmailBody": "Georgia Travel AI Guide'a katıldığınız için teşekkürler! Ücretsiz sürüm sınırlı erişim sunar — yapay zekâ seyahat rehberinize tam 7 günlük erişim için Trip Pass'inizi buradan edinin: {link}",
+    "limitReachedEmailSubject": "Günlük limitiniz doldu — işte Trip Pass'iniz",
+    "limitReachedEmailBody": "Bugün Georgia Travel AI Guide'daki ücretsiz günlük limitinize ulaştınız. 7 Günlük Trip Pass ile bir hafta boyunca sınırsız erişim elde edin: {link}"
+  },
+  "zh": {
+    "welcomeEmailSubject": "欢迎使用 Georgia Travel AI Guide!",
+    "welcomeEmailBody": "感谢您加入 Georgia Travel AI Guide!免费版本的使用有一定限制 —— 如需获得为期 7 天的完整 AI 旅行向导服务,请在此购买您的 Trip Pass:{link}",
+    "limitReachedEmailSubject": "您的每日限额已用完 — 这是您的 Trip Pass",
+    "limitReachedEmailBody": "您今天已达到 Georgia Travel AI Guide 的免费每日限额。购买 7 天 Trip Pass,即可享受一整周的无限制使用:{link}"
+  },
+  "ko": {
+    "welcomeEmailSubject": "Georgia Travel AI Guide에 오신 것을 환영합니다!",
+    "welcomeEmailBody": "Georgia Travel AI Guide에 가입해 주셔서 감사합니다! 무료 버전은 이용이 제한되어 있습니다 — AI 여행 가이드를 7일간 완전히 이용하시려면 여기에서 Trip Pass를 구매하세요: {link}",
+    "limitReachedEmailSubject": "일일 한도에 도달했습니다 — Trip Pass를 확인하세요",
+    "limitReachedEmailBody": "오늘 Georgia Travel AI Guide의 무료 일일 한도에 도달했습니다. 7일 Trip Pass로 일주일 동안 무제한으로 이용해 보세요: {link}"
+  },
+  "de": {
+    "welcomeEmailSubject": "Willkommen bei Georgia Travel AI Guide!",
+    "welcomeEmailBody": "Danke, dass du Georgia Travel AI Guide beigetreten bist! Die kostenlose Version bietet eingeschränkten Zugang — für vollen 7-Tage-Zugang zu deinem KI-Reisebegleiter, hol dir hier deinen Trip Pass: {link}",
+    "limitReachedEmailSubject": "Dein Tageslimit ist erreicht — hier ist dein Trip Pass",
+    "limitReachedEmailBody": "Du hast heute dein kostenloses Tageslimit bei Georgia Travel AI Guide erreicht. Hol dir mit dem 7-Tage-Trip-Pass eine ganze Woche uneingeschränkten Zugang: {link}"
+  },
+  "fr": {
+    "welcomeEmailSubject": "Bienvenue sur Georgia Travel AI Guide !",
+    "welcomeEmailBody": "Merci d'avoir rejoint Georgia Travel AI Guide ! La version gratuite offre un accès limité — pour un accès complet de 7 jours à votre guide de voyage IA, obtenez votre Trip Pass ici : {link}",
+    "limitReachedEmailSubject": "Votre limite quotidienne est atteinte — voici votre Trip Pass",
+    "limitReachedEmailBody": "Vous avez atteint votre limite quotidienne gratuite sur Georgia Travel AI Guide aujourd'hui. Profitez d'un accès illimité pendant toute une semaine avec le Trip Pass de 7 jours : {link}"
+  },
+  "es": {
+    "welcomeEmailSubject": "¡Bienvenido a Georgia Travel AI Guide!",
+    "welcomeEmailBody": "¡Gracias por unirte a Georgia Travel AI Guide! La versión gratuita tiene acceso limitado — para disfrutar 7 días completos con tu guía de viaje IA, consigue tu Trip Pass aquí: {link}",
+    "limitReachedEmailSubject": "Has alcanzado tu límite diario — aquí tienes tu Trip Pass",
+    "limitReachedEmailBody": "Hoy has alcanzado el límite diario gratuito de Georgia Travel AI Guide. Obtén acceso ilimitado durante toda una semana con el Trip Pass de 7 días: {link}"
+  },
+  "it": {
+    "welcomeEmailSubject": "Benvenuto su Georgia Travel AI Guide!",
+    "welcomeEmailBody": "Grazie per esserti unito a Georgia Travel AI Guide! La versione gratuita offre un accesso limitato — per un accesso completo di 7 giorni alla tua guida di viaggio IA, ottieni il tuo Trip Pass qui: {link}",
+    "limitReachedEmailSubject": "Hai raggiunto il limite giornaliero — ecco il tuo Trip Pass",
+    "limitReachedEmailBody": "Oggi hai raggiunto il limite giornaliero gratuito di Georgia Travel AI Guide. Ottieni accesso illimitato per un'intera settimana con il Trip Pass di 7 giorni: {link}"
+  },
+  "ja": {
+    "welcomeEmailSubject": "Georgia Travel AI Guideへようこそ!",
+    "welcomeEmailBody": "Georgia Travel AI Guideにご参加いただきありがとうございます!無料版はご利用に制限があります — AI旅行ガイドを7日間フルにご利用いただくには、こちらからTrip Passをご購入ください:{link}",
+    "limitReachedEmailSubject": "本日の無料利用上限に達しました — Trip Passのご案内",
+    "limitReachedEmailBody": "本日、Georgia Travel AI Guideの無料利用上限に達しました。7日間のTrip Passで1週間、無制限にご利用いただけます:{link}"
+  }
+}
