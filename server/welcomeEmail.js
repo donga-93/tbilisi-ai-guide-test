@@ -27,11 +27,7 @@ const RESEND_API_URL = "https://api.resend.com/emails";
 
 const CHECKOUT_URL = "https://cheerful-gnome-3af2aa.netlify.app/";
 
-// TODO: შეცვალე ვერიფიცირებული საკუთარი დომენით, როგორც კი ის Resend-ში
-// დადასტურდება — sandbox/onboarding დომენი (onboarding@resend.dev) მხოლოდ
-// ტესტირებისთვისაა და შეზღუდულია (Resend-ის საკუთარი ანგარიშის
-// ვერიფიცირებულ მისამართებზე ან ტესტ-რეჟიმზე).
-const FROM_ADDRESS = "Georgia Travel AI Guide <onboarding@resend.dev>";
+const FROM_ADDRESS = "Georgia Travel AI Guide <no-reply@georgiatravelaiguide.com>";
 
 // ------------------------------------------------------------
 // locale ტექსტების ჩატვირთვა — server/ დირექტორიის საკუთარი,
