@@ -374,6 +374,7 @@ async function claimPendingPass(uid, email) {
 module.exports = {
   db, // ⬅️ ახალი
   verifyClientToken,
+  getAccessLevel,
   checkDailyQuota,
   addUsage,
   setSubscriptionStatus, // ⬅️ ახალი

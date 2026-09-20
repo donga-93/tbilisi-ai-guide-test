@@ -19,6 +19,8 @@
 // Google Search is executed by Gemini itself.
 // There is therefore NO custom "webSearch" function in this file.
 
+const { getAccessLevel } = require("./auth");
+
 // ============================================================
 // Fuzzy title matching
 // ============================================================
@@ -1196,6 +1198,23 @@ async function executeTool(name, args, session) {
         return {
           found: false,
         };
+      }
+
+      const isFree = landmark.isFree === true;
+
+      if (!isFree) {
+        const { isSubscribed, isTester, hasActiveTripPass } =
+          await getAccessLevel(session.uid);
+        const hasAccess = isSubscribed || isTester || hasActiveTripPass;
+
+        if (!hasAccess) {
+          return {
+            found: true,
+            title: landmark.title,
+            type: landmark.type,
+            locked: true,
+          };
+        }
       }
 
       return {

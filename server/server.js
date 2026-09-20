@@ -758,6 +758,13 @@ function connectToGeminiLive(clientSocket, session) {
       "the exact place name returned by the catalog or findNearbyPlaces — never " +
       "translate or transliterate it. " +
       // ------------------------------------------------------
+      // Locked landmark content
+      // ------------------------------------------------------
+      "If getLandmarkDetails returns locked: true, tell the user briefly that this " +
+      "location's full details aren't available to them right now, without mentioning " +
+      "any specific product, subscription, or price — do not invent or guess at the " +
+      "location's history. " +
+      // ------------------------------------------------------
       // Map actions
       // ------------------------------------------------------
       "Map actions: call openPlaceOnMap to show a specific place; call showRouteToPlace " +
