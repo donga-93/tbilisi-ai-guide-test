@@ -271,32 +271,6 @@ async function addUsage(uid, seconds, quotaTier) {
 }
 
 // ============================================================
-// Subscription status write (webhook-ისთვის)
-//
-// ეს არის ერთადერთი ადგილი, სადაც isSubscribed ველი Firestore-ში
-// იწერება — RevenueCat-ის webhook-ის ერთადერთი მომხმარებელია.
-// Admin SDK Firestore rules-ს არ ექვემდებარება (allow write: if false
-// მხოლოდ client SDK-ს ზღუდავს).
-// ============================================================
-
-async function setSubscriptionStatus(uid, { isSubscribed, expiresAtMs }) {
-  await db
-    .collection("users")
-    .doc(uid)
-    .set(
-      {
-        isSubscribed,
-        subscriptionExpiresAt:
-          typeof expiresAtMs === "number"
-            ? admin.firestore.Timestamp.fromMillis(expiresAtMs)
-            : null,
-        subscriptionUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      },
-      { merge: true },
-    );
-}
-
-// ============================================================
 // Paddle → Firestore access-grant (webhook-ისთვის)
 //
 // Paddle checkout-ს არ სჭირდება Firebase login — მომხმარებელს
@@ -377,7 +351,6 @@ module.exports = {
   getAccessLevel,
   checkDailyQuota,
   addUsage,
-  setSubscriptionStatus, // ⬅️ ახალი
   grantTripPassFromWebhook, // ⬅️ ახალი
   claimPendingPass, // ⬅️ ახალი
   notifyLimitReachedForUid, // ⬅️ ახალი

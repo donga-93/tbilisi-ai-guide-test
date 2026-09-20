@@ -13,7 +13,6 @@ const {
   claimPendingPass,
   notifyLimitReachedForUid,
 } = require("./auth");
-const { handleRevenueCatWebhook } = require("./webhook");
 const { handlePaddleWebhook } = require("./paddleWebhook");
 const { sendWelcomeEmail } = require("./welcomeEmail");
 
@@ -30,9 +29,11 @@ function buildLandmarksSkeletonText(landmarks) {
 
   return (
     "საქართველოს ღირსშესანიშნაობების სია (თბილისი და სხვა რეგიონები) — " +
-    "თუ საუბარში რომელიმეს ახსენებენ, გამოიყენე მხოლოდ საორიენტაციოდ. " +
-    "დეტალური ინფორმაციისთვის " +
-    `გამოიძახე getLandmarkDetails:\n${lines}`
+    "თუ მომხმარებელი ეკითხება ან საუბარში ახსენებს რომელიმეს ამ სიიდან (მათ შორის " +
+    "ალტერნატიული სახელით ან ტრანსლიტერაციით), სავალდებულოა ჯერ გამოიძახო " +
+    "getLandmarkDetails მისი ზუსტი სახელით — ჯერ ეს, და მხოლოდ found:false-ის " +
+    "შემთხვევაში გადადი Google Search-ზე ან საკუთარ ცოდნაზე:\n" +
+    `${lines}`
   );
 }
 
@@ -72,17 +73,10 @@ const GEMINI_LIVE_URL =
 // ============================================================
 
 const server = http.createServer((req, res) => {
-  // RevenueCat webhook route.
-  //
   // wss (WebSocket.Server) მხოლოდ "upgrade" event-ს უსმენს
   // (path: "/live"-ისთვის) — ჩვეულებრივი HTTP POST request-ები
   // (როგორიც webhook-ია) აქ, ამ request handler-ში ხვდება,
   // საერთოდ არ ეჯახება WebSocket ლოგიკას.
-  if (req.method === "POST" && req.url === "/revenuecat-webhook") {
-    handleRevenueCatWebhook(req, res);
-    return;
-  }
-
   if (req.method === "POST" && req.url === "/paddle-webhook") {
     handlePaddleWebhook(req, res);
     return;
@@ -720,6 +714,13 @@ function connectToGeminiLive(clientSocket, session) {
       "the catalog doesn't cover: other real-world places, restaurants, cafes, hotels, " +
       "shops, attractions, museums, streets, neighborhoods, events, businesses, opening " +
       "hours, prices, reviews, or current information. " +
+      "If the place the user is asking about matches, or plausibly matches (including " +
+      "alternate names, spellings, or transliterations), an entry in the landmark " +
+      "catalog list provided below, you must call getLandmarkDetails for it FIRST — " +
+      "before using Google Search and before answering from your own general " +
+      "knowledge — even for a famous, well-known landmark you're confident you already " +
+      "know about. Do not skip straight to Google Search or your own knowledge for a " +
+      "catalog landmark just because you recognize it. " +
       "The catalog is not guaranteed to be complete — never assume a place or fact " +
       "doesn't exist just because it's not in the catalog. If getLandmarkDetails, " +
       "openPlaceOnMap, or showRouteToPlace returns found:false, use Google Search " +
@@ -764,6 +765,12 @@ function connectToGeminiLive(clientSocket, session) {
       "location's full details aren't available to them right now, without mentioning " +
       "any specific product, subscription, or price — do not invent or guess at the " +
       "location's history. " +
+      "If getLandmarkDetails returns locked: true for a location, do not use Google " +
+      "Search or any other source to answer about that same location instead — simply " +
+      "give the neutral 'not available right now' response and do not provide any " +
+      "further details, facts, or history about it, even if you already know them or " +
+      "could look them up. This applies even though Google Search is otherwise " +
+      "encouraged for places outside the catalog. " +
       // ------------------------------------------------------
       // Map actions
       // ------------------------------------------------------
