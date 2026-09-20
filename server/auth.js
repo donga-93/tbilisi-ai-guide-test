@@ -51,6 +51,7 @@ const db = admin.firestore();
 
 const GUEST_DAILY_LIMIT_SECONDS = 3 * 60; // Guest (anonymous) — paywall-ის ტრიგერი
 const DAILY_LIMIT_SECONDS = 20 * 60; // Signed-in, არა-subscriber
+const FREE_LIFETIME_LIMIT_SECONDS = 60 * 60; // signed-in, non-premium — 60 min total, once, forever
 const PREMIUM_DAILY_LIMIT_SECONDS = 60 * 60; // Subscribed
 const TESTER_SESSION_CAP_SECONDS = Number(
   process.env.TESTER_SESSION_CAP_SECONDS || 90 * 60,
@@ -119,17 +120,45 @@ async function checkDailyQuota(uid, isAnonymous, locale) {
       remainingSeconds: TESTER_SESSION_CAP_SECONDS,
       dailyLimitSeconds: null,
       isTesterBypass: true,
+      quotaTier: "tester",
+    };
+  }
+
+  const isPremium = isSubscribed || hasActiveTripPass;
+
+  if (!isPremium && !isAnonymous) {
+    const userRef = db.collection("users").doc(uid);
+    const userDoc = await userRef.get();
+    const usedSeconds = userDoc.exists
+      ? userDoc.data().voiceSecondsLifetimeUsed || 0
+      : 0;
+
+    const remainingSeconds = Math.max(
+      0,
+      FREE_LIFETIME_LIMIT_SECONDS - usedSeconds,
+    );
+    const allowed = remainingSeconds > 0;
+
+    if (!allowed) {
+      notifyLimitReachedForUid(uid, locale, "voice").catch((error) => {
+        console.error("Voice limit-reached email failed:", error.message);
+      });
+    }
+
+    return {
+      allowed,
+      remainingSeconds,
+      dailyLimitSeconds: FREE_LIFETIME_LIMIT_SECONDS,
+      isTesterBypass: false,
+      quotaTier: "free_lifetime",
     };
   }
 
   // ⬅️ ახალი: აქტიური Trip Pass იმავე ლიმიტს იძლევა, რაც subscription,
   // isSubscribed-ის შეცვლის გარეშე.
-  const dailyLimitSeconds =
-    isSubscribed || hasActiveTripPass
-      ? PREMIUM_DAILY_LIMIT_SECONDS
-      : isAnonymous
-        ? GUEST_DAILY_LIMIT_SECONDS
-        : DAILY_LIMIT_SECONDS;
+  const dailyLimitSeconds = isPremium
+    ? PREMIUM_DAILY_LIMIT_SECONDS
+    : GUEST_DAILY_LIMIT_SECONDS;
 
   const today = new Date().toISOString().slice(0, 10); // "YYYY-MM-DD" UTC
   const docRef = db.collection("usage").doc(`${uid}_${today}`);
@@ -153,6 +182,7 @@ async function checkDailyQuota(uid, isAnonymous, locale) {
     remainingSeconds,
     dailyLimitSeconds,
     isTesterBypass: false,
+    quotaTier: isPremium ? "premium" : "guest",
   };
 }
 
@@ -208,8 +238,23 @@ async function notifyLimitReachedForUid(uid, locale, type) {
 // გამოყენებული წამების დამატება (სესიის დასრულებისას)
 // ============================================================
 
-async function addUsage(uid, seconds) {
+async function addUsage(uid, seconds, quotaTier) {
   if (!seconds || seconds <= 0) return;
+
+  if (quotaTier === "free_lifetime") {
+    await db
+      .collection("users")
+      .doc(uid)
+      .set(
+        {
+          voiceSecondsLifetimeUsed: admin.firestore.FieldValue.increment(
+            Math.round(seconds),
+          ),
+        },
+        { merge: true },
+      );
+    return;
+  }
 
   const today = new Date().toISOString().slice(0, 10);
   const docRef = db.collection("usage").doc(`${uid}_${today}`);
@@ -337,5 +382,6 @@ module.exports = {
   notifyLimitReachedForUid, // ⬅️ ახალი
   GUEST_DAILY_LIMIT_SECONDS,
   DAILY_LIMIT_SECONDS,
+  FREE_LIFETIME_LIMIT_SECONDS,
   PREMIUM_DAILY_LIMIT_SECONDS,
 };

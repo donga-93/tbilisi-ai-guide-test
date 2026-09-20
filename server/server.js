@@ -124,6 +124,7 @@ wss.on("connection", (clientSocket) => {
     uid: null,
     usageStartAt: null,
     quotaTimer: null,
+    quotaTier: null,
     geminiSocket: null,
     currentLocation: null,
     landmarks: null,
@@ -182,6 +183,7 @@ wss.on("connection", (clientSocket) => {
         sendToClient(clientSocket, {
           type: "quota_exceeded",
           remainingSeconds: 0,
+          quotaTier: quota.quotaTier,
         });
         clientSocket.close(4029, "Daily quota exceeded");
         return;
@@ -209,11 +211,14 @@ wss.on("connection", (clientSocket) => {
         remainingSeconds: quota.remainingSeconds,
       });
 
+      session.quotaTier = quota.quotaTier;
+
       session.quotaTimer = setTimeout(() => {
         console.log(`Quota timer fired for uid ${uid} — closing session`);
         sendToClient(clientSocket, {
           type: "quota_exceeded",
           remainingSeconds: 0,
+          quotaTier: session.quotaTier,
         });
         try {
           clientSocket.close(4029, "Daily quota exceeded");
@@ -311,7 +316,7 @@ wss.on("connection", (clientSocket) => {
     if (session.uid && session.usageStartAt) {
       const usedSeconds = (Date.now() - session.usageStartAt) / 1000;
       session.usageStartAt = null;
-      addUsage(session.uid, usedSeconds).catch((error) => {
+      addUsage(session.uid, usedSeconds, session.quotaTier).catch((error) => {
         console.error("Failed to record usage:", error.message);
       });
     }
