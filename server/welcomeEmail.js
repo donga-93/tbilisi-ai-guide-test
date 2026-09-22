@@ -9,6 +9,8 @@
 // (server.js/auth.js) არასდროს დაჭირდეს დამატებითი try/catch.
 // ============================================================
 
+const { buildWelcomeEmailHtml } = require("./welcomeEmailHtml");
+
 const SUPPORTED_LOCALES = [
   "ka",
   "en",
@@ -29,12 +31,6 @@ const CHECKOUT_URL = "https://cheerful-gnome-3af2aa.netlify.app/";
 
 const FROM_ADDRESS = "Georgia Travel AI Guide <no-reply@georgiatravelaiguide.com>";
 
-// ------------------------------------------------------------
-// locale ტექსტების ჩატვირთვა — server/ დირექტორიის საკუთარი,
-// თვითკმარი emailLocales.json-იდან (Railway მხოლოდ server/-ს
-// დეპლოის, ამიტომ client-ის src/locales/-ზე დამოკიდებულება
-// გამორიცხულია)
-// ------------------------------------------------------------
 const EMAIL_LOCALES = require("./emailLocales.json");
 
 function loadLocaleTexts(locale) {
@@ -48,24 +44,30 @@ function renderLink(template) {
     : template;
 }
 
-async function sendEmail(to, subject, body) {
+async function sendEmail(to, subject, body, html) {
   if (!process.env.RESEND_API_KEY) {
     return { success: false, error: "RESEND_API_KEY is not set" };
   }
 
   try {
+    const payload = {
+      from: FROM_ADDRESS,
+      to,
+      subject,
+      text: body,
+    };
+
+    if (html) {
+      payload.html = html;
+    }
+
     const response = await fetch(RESEND_API_URL, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({
-        from: FROM_ADDRESS,
-        to,
-        subject,
-        text: body,
-      }),
+      body: JSON.stringify(payload),
     });
 
     if (!response.ok) {
@@ -82,10 +84,6 @@ async function sendEmail(to, subject, body) {
   }
 }
 
-// ============================================================
-// Welcome email — POST /register-user-ის მიერ გამოძახებული,
-// მხოლოდ users/{uid}.welcomeEmailSent !== true-ს შემთხვევაში
-// ============================================================
 async function sendWelcomeEmail(email, locale) {
   try {
     if (!email) {
@@ -103,16 +101,19 @@ async function sendWelcomeEmail(email, locale) {
       };
     }
 
-    return await sendEmail(email, subject, body);
+    let html;
+    try {
+      html = buildWelcomeEmailHtml(texts, CHECKOUT_URL);
+    } catch (htmlError) {
+      html = undefined;
+    }
+
+    return await sendEmail(email, subject, body, html);
   } catch (error) {
     return { success: false, error: error.message };
   }
 }
 
-// ============================================================
-// Limit-reached email — 7 დღეში ერთხელ, throttle-ის უკან
-// (იხ. auth.js-ის notifyLimitReachedForUid)
-// ============================================================
 async function sendLimitReachedEmail(email, locale) {
   try {
     if (!email) {
