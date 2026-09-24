@@ -19,7 +19,131 @@
 // Google Search is executed by Gemini itself.
 // There is therefore NO custom "webSearch" function in this file.
 
-const { getAccessLevel } = require("./auth");
+const { db, getAccessLevel } = require("./auth");
+
+// ============================================================
+// Freemium lock — სერვერული, ავტორიტეტული შემოწმება
+//
+// client-ის გამოგზავნილ isFree/description-ს არ ვენდობით: isFree და
+// აღწერა landmarks/{id}-დან მოდის (Admin SDK), წვდომა კი
+// users/{uid}-დან (getAccessLevel).
+// ============================================================
+
+const LANDMARK_DOC_TTL_MS = 10 * 60 * 1000;
+const ACCESS_CHECK_TTL_MS = 60 * 1000;
+
+const landmarkDocCache = new Map(); // id → { data, fetchedAt }
+
+async function getLandmarkDoc(id) {
+  if (!id || typeof id !== "string") return null;
+
+  const cached = landmarkDocCache.get(id);
+  if (cached && Date.now() - cached.fetchedAt < LANDMARK_DOC_TTL_MS) {
+    return cached.data;
+  }
+
+  try {
+    const snap = await db.collection("landmarks").doc(id).get();
+    const data = snap.exists ? snap.data() : null;
+    landmarkDocCache.set(id, { data, fetchedAt: Date.now() });
+    return data;
+  } catch (error) {
+    console.error(`getLandmarkDoc(${id}) failed:`, error.message);
+    return null;
+  }
+}
+
+// ძველი app build-ები Live-ში landmark-ებს id-ის გარეშე აგზავნიან.
+// ასეთ შემთხვევაში landmark-ს სერვერზე, Firestore-ის landmarks
+// კოლექციაში title-ით ვპოულობთ (იგივე fuzzy matching/alternateTitles).
+let allLandmarksCache = null; // { entries, fetchedAt }
+
+async function getAllLandmarkDocs() {
+  if (
+    allLandmarksCache &&
+    Date.now() - allLandmarksCache.fetchedAt < LANDMARK_DOC_TTL_MS
+  ) {
+    return allLandmarksCache.entries;
+  }
+
+  try {
+    const snap = await db.collection("landmarks").get();
+    const fetchedAt = Date.now();
+    const entries = snap.docs.map((d) => {
+      const data = d.data();
+      landmarkDocCache.set(d.id, { data, fetchedAt });
+      return { id: d.id, data };
+    });
+    allLandmarksCache = { entries, fetchedAt };
+    return entries;
+  } catch (error) {
+    console.error("getAllLandmarkDocs failed:", error.message);
+    return allLandmarksCache ? allLandmarksCache.entries : [];
+  }
+}
+
+async function resolveLandmarkDocByTitle(title, lang) {
+  if (!title || typeof title !== "string") return null;
+
+  const entries = await getAllLandmarkDocs();
+  const candidates = [];
+
+  for (const { id, data } of entries) {
+    const titles = data?.title;
+    if (!titles) continue;
+
+    const localizedTitle =
+      typeof titles === "string" ? titles : pickLocalized(titles, lang);
+    if (!localizedTitle) continue;
+
+    const alternateTitles =
+      typeof titles === "object"
+        ? Array.from(
+            new Set(
+              Object.values(titles).filter(
+                (value) =>
+                  typeof value === "string" &&
+                  value &&
+                  value !== localizedTitle,
+              ),
+            ),
+          )
+        : [];
+
+    candidates.push({ id, title: localizedTitle, alternateTitles, data });
+  }
+
+  const match = findLandmarkByTitle(candidates, title);
+  return match ? match.data : null;
+}
+
+async function sessionHasFullAccess(session) {
+  if (!session?.uid) return false;
+
+  const cached = session.landmarkAccessCache;
+  if (cached && Date.now() - cached.checkedAt < ACCESS_CHECK_TTL_MS) {
+    return cached.hasAccess;
+  }
+
+  let hasAccess = false;
+  try {
+    const { isSubscribed, isTester, hasActiveTripPass } = await getAccessLevel(
+      session.uid,
+    );
+    hasAccess = isSubscribed || isTester || hasActiveTripPass;
+  } catch (error) {
+    console.error("sessionHasFullAccess failed:", error.message);
+  }
+
+  session.landmarkAccessCache = { hasAccess, checkedAt: Date.now() };
+  return hasAccess;
+}
+
+function pickLocalized(value, lang) {
+  if (!value) return "";
+  if (typeof value === "string") return value;
+  return value[lang] || value.en || value.ka || "";
+}
 
 // ============================================================
 // Fuzzy title matching
@@ -1200,28 +1324,35 @@ async function executeTool(name, args, session) {
         };
       }
 
-      const isFree = landmark.isFree === true;
+      // isFree მხოლოდ Firestore-იდან. id თუ არ გვაქვს (ძველი build),
+      // Firestore-ში title-ით ვეძებთ; დოკუმენტი თუ მაინც ვერ ვიპოვეთ →
+      // locked (fail closed), გარდა სრული წვდომის მქონე მომხმარებლისა.
+      const doc = landmark.id
+        ? await getLandmarkDoc(landmark.id)
+        : await resolveLandmarkDocByTitle(
+            landmark.title,
+            session.preferredLanguage,
+          );
+      const isFree = doc?.isFree === true;
 
-      if (!isFree) {
-        const { isSubscribed, isTester, hasActiveTripPass } =
-          await getAccessLevel(session.uid);
-        const hasAccess = isSubscribed || isTester || hasActiveTripPass;
-
-        if (!hasAccess) {
-          return {
-            found: true,
-            title: landmark.title,
-            type: landmark.type,
-            locked: true,
-          };
-        }
+      if (!isFree && !(await sessionHasFullAccess(session))) {
+        return {
+          found: true,
+          title: landmark.title,
+          type: landmark.type,
+          locked: true,
+          message:
+            "Full details for this landmark are available in the full version of the app.",
+        };
       }
 
       return {
         found: true,
         title: landmark.title,
         type: landmark.type,
-        description: landmark.description,
+        description: doc
+          ? pickLocalized(doc.description, session.preferredLanguage)
+          : landmark.description,
       };
     }
 

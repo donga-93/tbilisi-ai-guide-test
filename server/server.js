@@ -761,13 +761,14 @@ function connectToGeminiLive(clientSocket, session) {
       // ------------------------------------------------------
       // Locked landmark content
       // ------------------------------------------------------
-      "If getLandmarkDetails returns locked: true, tell the user briefly that this " +
-      "location's full details aren't available to them right now, without mentioning " +
-      "any specific product, subscription, or price — do not invent or guess at the " +
-      "location's history. " +
+      "If getLandmarkDetails returns locked: true, tell the user briefly and politely " +
+      "that this location's full details are available in the full version of the " +
+      "app, without mentioning any price, payment, purchase, subscription, website, " +
+      "email, or link — do not invent or guess at the location's history. You may " +
+      "still show it on the map or give directions to it. " +
       "If getLandmarkDetails returns locked: true for a location, do not use Google " +
       "Search or any other source to answer about that same location instead — simply " +
-      "give the neutral 'not available right now' response and do not provide any " +
+      "give the neutral 'available in the full version' response and do not provide any " +
       "further details, facts, or history about it, even if you already know them or " +
       "could look them up. This applies even though Google Search is otherwise " +
       "encouraged for places outside the catalog. " +
