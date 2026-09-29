@@ -57,7 +57,7 @@ const TESTER_SESSION_CAP_SECONDS = Number(
   process.env.TESTER_SESSION_CAP_SECONDS || 90 * 60,
 ); // Tester — per-session safety-net, არა დღიური ჯამი
 
-const TRIP_PASS_DURATION_MS = 7 * 24 * 60 * 60 * 1000; // Paddle 7-Day Trip Pass
+const TRIP_PASS_DURATION_MS = 7 * 24 * 60 * 60 * 1000; // 7-Day Trip Pass (Creem / Paddle)
 
 const LIMIT_REACHED_EMAIL_THROTTLE_MS = 7 * 24 * 60 * 60 * 1000; // მაქს. 1 email კვირაში
 
@@ -271,78 +271,168 @@ async function addUsage(uid, seconds, quotaTier) {
 }
 
 // ============================================================
-// Paddle → Firestore access-grant (webhook-ისთვის)
+// Payment → Firestore access-grant (webhook-ისთვის: Creem და Paddle)
 //
-// Paddle checkout-ს არ სჭირდება Firebase login — მომხმარებელს
-// შეუძლია იყიდოს Trip Pass ანგარიშზე შესვლამდეც. ამიტომ webhook-ი
-// ჯერ ინახავს "pending" grant-ს email-ზე (Firestore-ში uid ჯერ არ
-// ვიცით), მოგვიანებით კი sign-in-ის დროს claimPendingPass მას
-// მიაბამს რეალურ uid-ს (users/{uid}.tripPassExpiresAt).
+// Checkout-ს არ სჭირდება Firebase login — მომხმარებელს შეუძლია
+// იყიდოს Trip Pass ანგარიშზე შესვლამდეც. ამიტომ webhook-ი ჯერ
+// ინახავს "pending" grant-ს email-ზე (uid ჯერ არ ვიცით), მოგვიანებით
+// კი sign-in-ის დროს claimPendingPass მას მიაბამს რეალურ uid-ს
+// (users/{uid}.tripPassExpiresAt).
+//
+// წესები:
+//   * 7 დღე ითვლება შეძენის მომენტიდან.
+//   * იდემპოტენტურობა: ყოველი გადახდა (transactionId) ერთხელ
+//     მუშავდება — processedPayments/{id} დოკუმენტით. Webhook-ის
+//     retry-ები Pass-ს ორჯერ აღარ დაამატებს.
+//   * განმეორებითი შეძენა ვადას აგრძელებს და არ ანაცვლებს:
+//     - თუ ჯერ არ-claimed pending pass არსებობს → +7 დღე მასზე;
+//     - თუ მომხმარებელს უკვე აქტიური Pass აქვს → claim-ისას
+//       დარჩენილ დღეებს ემატება (იხ. claimPendingPass).
+//   * ყველაფერი Firestore transaction-შია — race condition-ის გარეშე.
 // ============================================================
 
-async function grantTripPassFromWebhook(email, transactionId) {
-  const docId = email.toLowerCase();
-  const docRef = db.collection("pendingPasses").doc(docId);
-  const doc = await docRef.get();
+function paymentDocId(transactionId) {
+  // Firestore doc id-ში "/" დაუშვებელია.
+  return String(transactionId).replace(/\//g, "_");
+}
 
-  if (doc.exists && doc.data().transactionId === transactionId) {
-    // Paddle-მა იგივე webhook-ი retry-ით გამოგზავნა — უკვე დაწერილია.
-    console.log(
-      `Paddle: transaction ${transactionId} already granted for ${docId}, skipping`,
-    );
-    return;
+async function grantTripPassFromWebhook(email, transactionId, provider = "paddle") {
+  if (!email || !transactionId) {
+    throw new Error("grantTripPassFromWebhook: email and transactionId are required");
   }
 
-  const passExpiresAt = admin.firestore.Timestamp.fromMillis(
-    Date.now() + TRIP_PASS_DURATION_MS,
-  );
+  const docId = email.trim().toLowerCase();
+  const pendingRef = db.collection("pendingPasses").doc(docId);
+  const paymentRef = db
+    .collection("processedPayments")
+    .doc(paymentDocId(transactionId));
 
-  await docRef.set({
-    passExpiresAt,
-    transactionId,
-    claimed: false,
-    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+  const result = await db.runTransaction(async (tx) => {
+    const [paymentSnap, pendingSnap] = await Promise.all([
+      tx.get(paymentRef),
+      tx.get(pendingRef),
+    ]);
+
+    if (paymentSnap.exists) {
+      return { alreadyProcessed: true };
+    }
+
+    // Backward compatibility: payments processed before processedPayments
+    // existed were deduped only via pendingPasses.transactionId.
+    if (pendingSnap.exists && pendingSnap.data().transactionId === transactionId) {
+      return { alreadyProcessed: true };
+    }
+
+    const now = Date.now();
+    let passExpiresMs = now + TRIP_PASS_DURATION_MS;
+    let durationMs = TRIP_PASS_DURATION_MS;
+
+    if (pendingSnap.exists) {
+      const data = pendingSnap.data();
+      const existingExpiry = data.passExpiresAt?.toMillis?.() || 0;
+
+      // ჯერ არ-claimed და არ-ვადაგასული pending pass → ვაგრძელებთ.
+      if (data.claimed !== true && existingExpiry > now) {
+        passExpiresMs = existingExpiry + TRIP_PASS_DURATION_MS;
+        durationMs = (data.durationMs || TRIP_PASS_DURATION_MS) + TRIP_PASS_DURATION_MS;
+      }
+    }
+
+    tx.set(pendingRef, {
+      passExpiresAt: admin.firestore.Timestamp.fromMillis(passExpiresMs),
+      durationMs,
+      transactionId,
+      provider,
+      claimed: false,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    tx.set(paymentRef, {
+      email: docId,
+      provider,
+      processedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    return { alreadyProcessed: false, passExpiresMs };
   });
 
+  if (result.alreadyProcessed) {
+    console.log(
+      `${provider}: transaction ${transactionId} already processed for ${docId}, skipping`,
+    );
+    return { granted: false, alreadyProcessed: true };
+  }
+
   console.log(
-    `Paddle: pending Trip Pass granted for ${docId} (transaction ${transactionId})`,
+    `${provider}: pending Trip Pass granted for ${docId} (transaction ${transactionId}), ` +
+      `expires ${new Date(result.passExpiresMs).toISOString()}`,
   );
+
+  return { granted: true, alreadyProcessed: false };
 }
 
 // ============================================================
 // Pending pass-ის "მიჩემება" — გამოიძახება sign-in-ის შემდეგ
-// (client → POST /claim-pass), როცა უკვე ვიცით რეალური uid
+// (client → POST /claim-pass), როცა უკვე ვიცით რეალური uid.
+//
+// თუ მომხმარებელს უკვე აქტიური Pass აქვს (მაგ. ადრე იყიდა და
+// ახლა ხელახლა), ახალი ვადა = არსებული ვადა + ნაყიდი ხანგრძლივობა,
+// რომ დარჩენილი დღეები არ დაიკარგოს.
 // ============================================================
 
 async function claimPendingPass(uid, email) {
-  const docId = email.toLowerCase();
-  const docRef = db.collection("pendingPasses").doc(docId);
-  const doc = await docRef.get();
+  const docId = email.trim().toLowerCase();
+  const pendingRef = db.collection("pendingPasses").doc(docId);
+  const userRef = db.collection("users").doc(uid);
 
-  if (!doc.exists) {
-    return { claimed: false };
-  }
+  return db.runTransaction(async (tx) => {
+    const [pendingSnap, userSnap] = await Promise.all([
+      tx.get(pendingRef),
+      tx.get(userRef),
+    ]);
 
-  const data = doc.data();
+    if (!pendingSnap.exists) {
+      return { claimed: false };
+    }
 
-  if (data.claimed === true) {
-    return { claimed: false };
-  }
+    const data = pendingSnap.data();
 
-  const expiresAt = data.passExpiresAt;
+    if (data.claimed === true) {
+      return { claimed: false };
+    }
 
-  if (!expiresAt || expiresAt.toMillis() <= Date.now()) {
-    return { claimed: false };
-  }
+    const now = Date.now();
+    const pendingExpiry = data.passExpiresAt?.toMillis?.() || 0;
 
-  await db
-    .collection("users")
-    .doc(uid)
-    .set({ tripPassExpiresAt: expiresAt }, { merge: true });
+    if (pendingExpiry <= now) {
+      return { claimed: false };
+    }
 
-  await docRef.set({ claimed: true }, { merge: true });
+    const durationMs = data.durationMs || TRIP_PASS_DURATION_MS;
+    const userExpiry = userSnap.exists
+      ? userSnap.data().tripPassExpiresAt?.toMillis?.() || 0
+      : 0;
 
-  return { claimed: true, expiresAt };
+    const newExpiryMs =
+      userExpiry > now
+        ? Math.max(pendingExpiry, userExpiry + durationMs)
+        : pendingExpiry;
+
+    const expiresAt = admin.firestore.Timestamp.fromMillis(newExpiryMs);
+
+    tx.set(userRef, { tripPassExpiresAt: expiresAt }, { merge: true });
+    tx.set(
+      pendingRef,
+      {
+        claimed: true,
+        claimedByUid: uid,
+        claimedAt: admin.firestore.FieldValue.serverTimestamp(),
+      },
+      { merge: true },
+    );
+
+    return { claimed: true, expiresAt };
+  });
 }
 
 module.exports = {

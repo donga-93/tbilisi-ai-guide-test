@@ -14,6 +14,8 @@ const {
   notifyLimitReachedForUid,
 } = require("./auth");
 const { handlePaddleWebhook } = require("./paddleWebhook");
+const { handleCreemWebhook } = require("./creemWebhook");
+const { handleCreemCheckout } = require("./creemCheckout");
 const { sendWelcomeEmail } = require("./welcomeEmail");
 
 // ============================================================
@@ -77,6 +79,38 @@ const server = http.createServer((req, res) => {
   // (path: "/live"-ისთვის) — ჩვეულებრივი HTTP POST request-ები
   // (როგორიც webhook-ია) აქ, ამ request handler-ში ხვდება,
   // საერთოდ არ ეჯახება WebSocket ლოგიკას.
+  // req.url შეიძლება შეიცავდეს query string-ს (მაგ. /checkout?email=...),
+  // ამიტომ route-ის შედარებისთვის მხოლოდ pathname-ს ვიღებთ.
+  let pathname;
+  try {
+    pathname = new URL(req.url, "http://localhost").pathname;
+  } catch (error) {
+    // Malformed request target (e.g. "GET http://[") — without this the
+    // thrown error would crash the whole process, including live voice sessions.
+    res.writeHead(400);
+    res.end();
+    return;
+  }
+
+  // Creem: საიტის "Buy" ღილაკი → აქ → 302 Creem-ის hosted checkout-ზე
+  if (req.method === "GET" && pathname === "/checkout") {
+    handleCreemCheckout(req, res);
+    return;
+  }
+
+  // Creem: checkout.completed და სხვა event-ები
+  if (req.method === "POST" && pathname === "/creem-webhook") {
+    handleCreemWebhook(req, res);
+    return;
+  }
+
+  // Health check (Creem/ბრაუზერიდან სწრაფი შემოწმებისთვის)
+  if (req.method === "GET" && pathname === "/health") {
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    res.end("OK");
+    return;
+  }
+
   if (req.method === "POST" && req.url === "/paddle-webhook") {
     handlePaddleWebhook(req, res);
     return;
