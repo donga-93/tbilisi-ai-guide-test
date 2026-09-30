@@ -216,7 +216,7 @@ async function notifyLimitReachedForUid(uid, locale, type) {
     return { sent: false, reason: "no_email" };
   }
 
-  const result = await sendLimitReachedEmail(email, locale);
+  const result = await sendLimitReachedEmail(email, locale, uid);
 
   if (!result.success) {
     console.error(

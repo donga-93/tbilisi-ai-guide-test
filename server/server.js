@@ -498,6 +498,7 @@ function handleRegisterUser(req, res) {
         const result = await sendWelcomeEmail(
           decodedToken.email,
           payload.locale,
+          uid,
         );
 
         if (result.success) {

@@ -27,9 +27,11 @@ const SUPPORTED_LOCALES = [
 
 const RESEND_API_URL = "https://api.resend.com/emails";
 
-const CHECKOUT_URL = "https://cheerful-gnome-3af2aa.netlify.app/";
+const CHECKOUT_URL = "https://georgiatravelaiguide.com";
 
 const FROM_ADDRESS = "Georgia Travel AI Guide <no-reply@georgiatravelaiguide.com>";
+
+const REPLY_TO_ADDRESS = "support@georgiatravelaiguide.com";
 
 const EMAIL_LOCALES = require("./emailLocales.json");
 
@@ -38,9 +40,18 @@ function loadLocaleTexts(locale) {
   return EMAIL_LOCALES[safeLocale] || EMAIL_LOCALES.en;
 }
 
-function renderLink(template) {
+// checkout საიტი URL-იდან კითხულობს ?email= და ?uid= პარამეტრებს
+function buildCheckoutUrl(to, uid) {
+  let url = `${CHECKOUT_URL}/?email=${encodeURIComponent(to)}`;
+  if (uid) {
+    url += `&uid=${encodeURIComponent(uid)}`;
+  }
+  return url;
+}
+
+function renderLink(template, link) {
   return typeof template === "string"
-    ? template.replace(/\{link\}/g, CHECKOUT_URL)
+    ? template.replace(/\{link\}/g, () => link)
     : template;
 }
 
@@ -52,6 +63,7 @@ async function sendEmail(to, subject, body, html) {
   try {
     const payload = {
       from: FROM_ADDRESS,
+      reply_to: REPLY_TO_ADDRESS,
       to,
       subject,
       text: body,
@@ -84,15 +96,16 @@ async function sendEmail(to, subject, body, html) {
   }
 }
 
-async function sendWelcomeEmail(email, locale) {
+async function sendWelcomeEmail(email, locale, uid) {
   try {
     if (!email) {
       return { success: false, error: "Missing recipient email" };
     }
 
     const texts = loadLocaleTexts(locale);
+    const link = buildCheckoutUrl(email, uid);
     const subject = texts.welcomeEmailSubject;
-    const body = renderLink(texts.welcomeEmailBody);
+    const body = renderLink(texts.welcomeEmailBody, link);
 
     if (!subject || !body) {
       return {
@@ -103,7 +116,8 @@ async function sendWelcomeEmail(email, locale) {
 
     let html;
     try {
-      html = buildWelcomeEmailHtml(texts, CHECKOUT_URL);
+      // href ატრიბუტში & უნდა იყოს escape-ებული
+      html = buildWelcomeEmailHtml(texts, link.replace(/&/g, "&amp;"));
     } catch (htmlError) {
       html = undefined;
     }
@@ -114,15 +128,16 @@ async function sendWelcomeEmail(email, locale) {
   }
 }
 
-async function sendLimitReachedEmail(email, locale) {
+async function sendLimitReachedEmail(email, locale, uid) {
   try {
     if (!email) {
       return { success: false, error: "Missing recipient email" };
     }
 
     const texts = loadLocaleTexts(locale);
+    const link = buildCheckoutUrl(email, uid);
     const subject = texts.limitReachedEmailSubject;
-    const body = renderLink(texts.limitReachedEmailBody);
+    const body = renderLink(texts.limitReachedEmailBody, link);
 
     if (!subject || !body) {
       return {
