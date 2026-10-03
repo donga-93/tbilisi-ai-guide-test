@@ -196,6 +196,12 @@ async function checkDailyQuota(uid, isAnonymous, locale) {
 //     text-chat-ის დღიური ლიმიტისთვის, client-ის მოთხოვნით
 // ============================================================
 async function notifyLimitReachedForUid(uid, locale, type) {
+  // Emails paused — არაფერს ვწერთ, ამიტომ შემდეგ ლიმიტზე თავისით აღდგება
+  if (process.env.EMAILS_ENABLED === "false") {
+    console.log("limit email paused");
+    return { sent: false, reason: "paused" };
+  }
+
   const userRef = db.collection("users").doc(uid);
   const userDoc = await userRef.get();
   const lastSentAt = userDoc.exists

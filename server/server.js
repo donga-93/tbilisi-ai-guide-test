@@ -18,6 +18,9 @@ const { handleCreemWebhook } = require("./creemWebhook");
 const { handleCreemCheckout } = require("./creemCheckout");
 const { sendWelcomeEmail } = require("./welcomeEmail");
 
+// Welcome / limit-reached email-ების დაპაუზება — მხოლოდ ზუსტი "false" თიშავს
+const EMAILS_ENABLED = process.env.EMAILS_ENABLED !== "false";
+
 // ============================================================
 // Landmarks skeleton
 // ============================================================
@@ -494,7 +497,19 @@ function handleRegisterUser(req, res) {
 
       let sent = false;
 
-      if (!alreadySent && decodedToken.email) {
+      if (!alreadySent && decodedToken.email && !EMAILS_ENABLED) {
+        // Emails paused — pending flag-ს ვწერთ, რომ მოგვიანებით
+        // scripts/sendPendingWelcomeEmails.js-მა გაუგზავნოს
+        await userRef.set(
+          {
+            welcomeEmailPending: true,
+            welcomeEmailPendingAt: admin.firestore.FieldValue.serverTimestamp(),
+            welcomeEmailPendingLocale: payload.locale || "en",
+          },
+          { merge: true },
+        );
+        console.log(`welcome email paused for ${uid}`);
+      } else if (!alreadySent && decodedToken.email) {
         const result = await sendWelcomeEmail(
           decodedToken.email,
           payload.locale,
@@ -502,7 +517,13 @@ function handleRegisterUser(req, res) {
         );
 
         if (result.success) {
-          await userRef.set({ welcomeEmailSent: true }, { merge: true });
+          await userRef.set(
+            {
+              welcomeEmailSent: true,
+              welcomeEmailPending: admin.firestore.FieldValue.delete(),
+            },
+            { merge: true },
+          );
           sent = true;
         } else {
           console.error("register-user: welcome email failed:", result.error);
